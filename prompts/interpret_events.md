@@ -52,7 +52,7 @@ Each CLICK `detail` has three fields:
 <example type="good">Pasted "SELECT * FROM users LIMIT 10" into the Supabase SQL editor for the Tada2 project.</example>
 <example type="bad">pasted from clipboard</example>
 
-<example type="good">Switched to Google Chrome, which had Gmail open to "Inbox (3,124) - austin@tadatoday.ai".</example>
+<example type="good">Switched to Google Chrome, which had Gmail open to "Inbox (3,124) - user@example.com".</example>
 <example type="bad">switched to Google Chrome</example>
 
 <example type="good">Clicked "Tanmay Pajgade" in the Slack DMs sidebar.</example>
