@@ -1,0 +1,20 @@
+{
+  "name": "activity-tracker",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "bun --hot run src/index.ts",
+    "start:ui": "cd frontend && bun install && bun run build && cd .. && bun --hot run src/index.ts",
+    "dev": "concurrently -n api,ui -c blue,magenta \"bun --hot run src/index.ts\" \"cd frontend && npm run dev\"",
+    "restart": "lsof -ti :3001 | xargs kill -9 2>/dev/null; bun --hot run src/index.ts",
+    "build": "cd frontend && bun install && bun run build",
+    "dev:ui": "cd frontend && bun run dev"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
+    "hono": "^4.12.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.10",
+    "concurrently": "^9.2.1"
+  }
+}

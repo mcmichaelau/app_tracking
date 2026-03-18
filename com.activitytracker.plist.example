@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 
+  LaunchAgent plist for running the Activity Tracker server at login.
+  
+  To use:
+  1. Copy this file to ~/Library/LaunchAgents/com.activitytracker.plist
+  2. Replace /Users/YOUR_USERNAME with your actual home directory path
+  3. Run: launchctl load ~/Library/LaunchAgents/com.activitytracker.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.activitytracker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/.bun/bin/bun</string>
+    <string>run</string>
+    <string>/Users/YOUR_USERNAME/app_tracking/bun-app/src/index.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/app_tracking/bun-app</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/Library/Logs/ActivityTracker/bun.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/Library/Logs/ActivityTracker/bun-error.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USERNAME/.bun/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

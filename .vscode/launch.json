@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:app_tracking}/SwiftTracker",
+            "name": "Debug activity-tracker (SwiftTracker)",
+            "target": "activity-tracker",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug activity-tracker (SwiftTracker)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:app_tracking}/SwiftTracker",
+            "name": "Release activity-tracker (SwiftTracker)",
+            "target": "activity-tracker",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release activity-tracker (SwiftTracker)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:app_tracking}/SwiftTracker",
+            "name": "Debug ActivityTrackerApp (SwiftTracker)",
+            "target": "ActivityTrackerApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ActivityTrackerApp (SwiftTracker)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:app_tracking}/SwiftTracker",
+            "name": "Release ActivityTrackerApp (SwiftTracker)",
+            "target": "ActivityTrackerApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ActivityTrackerApp (SwiftTracker)"
+        }
+    ]
+}

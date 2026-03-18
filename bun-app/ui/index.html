@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>activity tracker</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #1c1c1e;
+    --bg2:       #2c2c2e;
+    --bg3:       #3a3a3c;
+    --bg-hover:  rgba(255,255,255,0.06);
+    --bg-subtle: rgba(255,255,255,0.03);
+    --text:      rgba(255,255,255,0.85);
+    --text2:     rgba(255,255,255,0.5);
+    --text3:     rgba(255,255,255,0.28);
+    --border:    rgba(255,255,255,0.1);
+    --accent:    #0a84ff;
+    --green:     #30d158;
+    --orange:    #ff9f0a;
+    --red:       #ff453a;
+    --purple:    #bf5af2;
+    --cyan:      #32ade6;
+    --font: 'SF Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  /* ── Nav ── */
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 16px;
+    height: 38px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    flex-shrink: 0;
+  }
+  nav a {
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    transition: color 0.1s, background 0.1s;
+  }
+  nav a:hover { color: var(--text); background: var(--bg-hover); }
+  nav a.active { color: var(--text); }
+  .nav-sep { color: var(--text3); font-size: 10px; padding: 0 2px; }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    flex-shrink: 0;
+  }
+
+  /* Segmented control */
+  .seg {
+    display: flex;
+    border: 0.5px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    background: var(--bg-subtle);
+    border: none;
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 10px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .seg button:hover { background: var(--bg-hover); color: var(--text); }
+  .seg button.active { background: var(--accent); color: #fff; }
+
+  .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .count { color: var(--text3); font-size: 10px; }
+
+  .icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 14px;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s, color 0.1s;
+  }
+  .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+  /* ── Table ── */
+  .table-wrap {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    color: var(--text3);
+    font-size: 10px;
+    font-weight: 500;
+    text-align: left;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+    z-index: 1;
+  }
+
+  tbody tr {
+    border-bottom: 0.5px solid rgba(255,255,255,0.04);
+    cursor: default;
+  }
+  tbody tr:hover { background: var(--bg-hover); }
+
+  td {
+    padding: 4px 12px;
+    font-size: 10px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.5;
+  }
+
+  /* Column widths */
+  .col-ts     { width: 130px; }
+  .col-type   { width: 100px; }
+  .col-app    { width: 140px; }
+  .col-detail  { width: auto; }
+  .col-interp  { width: 280px; }
+
+  .ts-cell     { color: var(--text2); }
+  .app-cell    { color: var(--text); }
+  .detail-cell { color: var(--text2); }
+  .interp-cell { color: var(--text3); font-style: italic; }
+
+  /* Type dot + label */
+  .type-cell { display: flex; align-items: center; gap: 5px; }
+  .dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── Empty state ── */
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text3);
+  }
+  .empty-icon { font-size: 22px; }
+
+  /* ── Detail popover ── */
+  .popover-overlay {
+    position: fixed; inset: 0;
+    z-index: 100;
+    display: none;
+  }
+  .popover-overlay.open { display: block; }
+  .popover {
+    position: fixed;
+    background: var(--bg2);
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    min-width: 380px;
+    max-width: 540px;
+    z-index: 101;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .popover-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .popover-type { font-size: 11px; font-weight: 600; }
+  .popover-app  { color: var(--text3); font-size: 10px; }
+  .popover-section {
+    color: var(--text3);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 8px 0 4px;
+  }
+  .popover-detail {
+    background: var(--bg);
+    border: 0.5px solid var(--border);
+    border-radius: 5px;
+    padding: 10px;
+    font-size: 10px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+    user-select: text;
+  }
+  .popover-copy {
+    margin-left: auto;
+    background: transparent;
+    border: 0.5px solid var(--border);
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .popover-copy:hover { background: var(--bg-hover); color: var(--text); }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="active">events</a>
+  <span class="nav-sep">/</span>
+  <a href="/logs">logs</a>
+  <span class="nav-sep">/</span>
+  <a href="/settings">settings</a>
+</nav>
+
+<div class="toolbar">
+  <div class="seg" id="seg">
+    <button data-filter="1h" class="active">1h</button>
+    <button data-filter="12h">12h</button>
+    <button data-filter="24h">24h</button>
+    <button data-filter="7d">7d</button>
+  </div>
+  <div class="toolbar-right">
+    <span class="count" id="count">— events</span>
+    <button class="icon-btn" id="copy-btn" title="Copy to clipboard">⧉</button>
+  </div>
+</div>
+
+<div id="main-content" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+  <div class="table-wrap" id="table-wrap">
+    <table id="events-table">
+      <thead>
+        <tr>
+          <th class="col-ts">timestamp</th>
+          <th class="col-type">type</th>
+          <th class="col-app">app</th>
+          <th class="col-detail">detail</th>
+          <th class="col-interp">interpretation</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+  <div class="empty" id="empty" style="display:none;">
+    <div class="empty-icon">⬚</div>
+    <div>no events in this range</div>
+  </div>
+</div>
+
+<!-- Detail popover -->
+<div class="popover-overlay" id="popover-overlay">
+  <div class="popover" id="popover">
+    <div class="popover-header">
+      <span class="dot" id="p-dot"></span>
+      <span class="popover-type" id="p-type"></span>
+      <span class="popover-app" id="p-app"></span>
+      <button class="popover-copy" id="p-copy">copy</button>
+    </div>
+    <div class="popover-detail" id="p-detail"></div>
+  </div>
+</div>
+
+<script>
+const TYPE_COLORS = {
+  'CLICK':      '#0a84ff',
+  'TYPING':     '#30d158',
+  'COPY':       '#ff9f0a',
+  'PASTE':      '#ff9f0a',
+  'SHORTCUT':   '#bf5af2',
+  'APP SWITCH': 'rgba(255,255,255,0.28)',
+  'KEY':        '#32ade6',
+};
+function typeColor(t) { return TYPE_COLORS[t] || 'rgba(255,255,255,0.5)'; }
+
+let events = [];
+let filter = '1h';
+let refreshTimer = null;
+let incremental = false;
+
+function dateRange() {
+  const now = new Date();
+  const ranges = { '1h': 3600, '12h': 43200, '24h': 86400, '7d': 604800 };
+  const since = new Date(now - ranges[filter] * 1000);
+  return { since: since.toISOString(), until: now.toISOString() };
+}
+
+async function loadEvents() {
+  const { since, until } = dateRange();
+  const url = `/api/events?limit=20000&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+  try {
+    const res = await fetch(url);
+    const fetched = await res.json();
+    if (incremental && events.length > 0) {
+      const existingById = new Map(events.map(e => [e.id, e]));
+      const newEvents = [];
+      let changed = false;
+      for (const e of fetched) {
+        if (existingById.has(e.id)) {
+          const ex = existingById.get(e.id);
+          if (ex.interpretation !== e.interpretation) { ex.interpretation = e.interpretation; changed = true; }
+        } else {
+          newEvents.push(e);
+        }
+      }
+      if (newEvents.length > 0) events = [...newEvents, ...events];
+      if (!newEvents.length && !changed) return; // nothing changed, skip re-render
+    } else {
+      events = fetched;
+      incremental = true;
+    }
+    render();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function formatTime(iso) {
+  try {
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch { return iso; }
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function render() {
+  const tbody = document.getElementById('tbody');
+  const empty = document.getElementById('empty');
+  const tableWrap = document.getElementById('table-wrap');
+  document.getElementById('count').textContent = `${events.length} events`;
+
+  if (events.length === 0) {
+    tableWrap.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+  tableWrap.style.display = '';
+  empty.style.display = 'none';
+
+  const rows = events.map((e, i) => {
+    const color = typeColor(e.event_type);
+    const detail = e.detail ? esc(e.detail) : '<span style="color:var(--text3)">—</span>';
+    const interp = e.interpretation ? esc(e.interpretation) : '<span style="color:var(--text3)">—</span>';
+    return `<tr data-idx="${i}" ondblclick="openPopover(${i}, event)">
+      <td class="ts-cell">${formatTime(e.timestamp)}</td>
+      <td><div class="type-cell">
+        <div class="dot" style="background:${color}"></div>
+        <span style="color:${color}">${esc(e.event_type.toLowerCase())}</span>
+      </div></td>
+      <td class="app-cell">${esc(e.app)}</td>
+      <td class="detail-cell">${detail}</td>
+      <td class="interp-cell">${interp}</td>
+    </tr>`;
+  }).join('');
+
+  tbody.innerHTML = rows;
+}
+
+// Segmented control
+document.getElementById('seg').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-filter]');
+  if (!btn) return;
+  filter = btn.dataset.filter;
+  incremental = false;
+  document.querySelectorAll('#seg button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadEvents();
+});
+
+// Copy all
+document.getElementById('copy-btn').addEventListener('click', () => {
+  const header = 'timestamp\ttype\tapp\tdetail';
+  const rows = events.map(e =>
+    `${formatTime(e.timestamp)}\t${e.event_type}\t${e.app}\t${(e.detail??'').replace(/\t/g,' ')}`
+  );
+  navigator.clipboard.writeText([header, ...rows].join('\n'));
+});
+
+// Popover
+function openPopover(idx, mouseEvent) {
+  const e = events[idx];
+  if (!e) return;
+  const color = typeColor(e.event_type);
+  document.getElementById('p-dot').style.background = color;
+  document.getElementById('p-type').textContent = e.event_type;
+  document.getElementById('p-type').style.color = color;
+  document.getElementById('p-app').textContent = e.app;
+
+  let detail = e.detail ?? '';
+  try { detail = JSON.stringify(JSON.parse(detail), null, 2); } catch {}
+  document.getElementById('p-detail').textContent = detail || '—';
+
+  document.getElementById('p-copy').onclick = () => {
+    navigator.clipboard.writeText(e.detail ?? '');
+    document.getElementById('p-copy').textContent = 'copied!';
+    setTimeout(() => document.getElementById('p-copy').textContent = 'copy', 1200);
+  };
+
+  const popover = document.getElementById('popover');
+  const overlay = document.getElementById('popover-overlay');
+  overlay.classList.add('open');
+
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let x = mouseEvent.clientX + 8, y = mouseEvent.clientY + 8;
+  requestAnimationFrame(() => {
+    const pw = popover.offsetWidth, ph = popover.offsetHeight;
+    if (x + pw > vw - 16) x = vw - pw - 16;
+    if (y + ph > vh - 16) y = vh - ph - 16;
+    popover.style.left = x + 'px';
+    popover.style.top  = y + 'px';
+  });
+}
+
+document.getElementById('popover-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) {
+    document.getElementById('popover-overlay').classList.remove('open');
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.getElementById('popover-overlay').classList.remove('open');
+});
+
+function startRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(loadEvents, 2000);
+}
+
+loadEvents();
+startRefresh();
+</script>
+</body>
+</html>

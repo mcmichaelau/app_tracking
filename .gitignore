@@ -1,0 +1,73 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+bun-app/node_modules/
+
+# Build outputs
+dist/
+bun-app/dist/
+.build/
+SwiftTracker/.build/
+SwiftTracker/dist/
+tracker/.build/
+*.o
+*.a
+*.dylib
+*.dmg
+
+# IDE and editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+*.xcuserstate
+xcuserdata/
+
+# Logs
+*.log
+logs/
+
+# Database files (local user data)
+*.db
+*.sqlite
+*.sqlite3
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# Xcode
+DerivedData/
+*.xcworkspace
+!*.xcworkspace/contents.xcworkspacedata
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+
+# Bun
+bun.lockb
+bun.lock
+package-lock.json
+
+# Cursor/VSCode local
+.cursor/projects/
+
+# Claude settings
+.claude/
+
+# Testing artifacts (may contain personal data)
+testing/interpretted_output.csv
+
+# Tracker binary
+tracker/tracker
