@@ -72,7 +72,7 @@ export async function fetchSettings() {
   return res.json();
 }
 
-export async function saveSettings(settings: { openai_api_key?: string }) {
+export async function saveSettings(settings: { groq_api_key?: string }) {
   const res = await fetch(`${API}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

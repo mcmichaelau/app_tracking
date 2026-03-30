@@ -12,12 +12,12 @@ function quickInterpretation(event_type: string, app: string, detail: string | n
       return detail ? `pasted "${detail.slice(0, 80)}" from clipboard` : "pasted from clipboard";
     case "SHORTCUT":
       return detail ? `used ${detail} in ${app}` : "used shortcut";
-    case "TYPING":
-      return detail ? `typed "${detail}" in ${app}` : `typed in ${app}`;
     case "KEY":
       return detail ? `pressed ${detail} in ${app}` : "pressed key";
     case "APP SWITCH":
       return `switched to ${app}`;
+    case "SCROLL":
+      return `scrolled in ${app}`;
     default:
       return `${event_type.toLowerCase()} in ${app}`;
   }
@@ -79,6 +79,9 @@ export function ingest(events: Record<string, unknown>[]): void {
     } else if (event_type === "PASTE") {
       // PASTE dedup: same content + app within 2s
       if (isDuplicate(`PASTE::${app}::${detail ?? ""}`, now, 2000)) continue;
+    } else if (event_type === "SCROLL") {
+      // SCROLL: one AX snapshot per idle; drop duplicate detail+app within 400ms
+      if (isDuplicate(`SCROLL::${app}::${detail ?? ""}`, now, 400)) continue;
     }
 
     const id = insertEvent({
@@ -90,14 +93,17 @@ export function ingest(events: Record<string, unknown>[]): void {
 
     const ts = (e.timestamp as string) ?? new Date().toISOString();
 
-    // Set quick interpretation immediately as placeholder
-    updateInterpretation(id, quickInterpretation(event_type, app, detail));
+    // TYPING: store raw text as interpretation (no LLM). Others: placeholder until LLM overwrites.
+    const interpretation =
+      event_type === "TYPING" ? (detail ?? "") : quickInterpretation(event_type, app, detail);
+    updateInterpretation(id, interpretation);
 
     if (event_type === "CLICK" && detail) {
       lastClickContext = { app, detail, timestamp: ts };
     }
 
-    // Send all events to LLM for rich interpretation (overwrites placeholder)
+    // LLM interpretation for non-TYPING events (TYPING is final above)
+    if (event_type === "TYPING") continue;
     const clickContext = event_type !== "CLICK" ? lastClickContext : null;
     enqueue({ id, timestamp: ts, event_type, app, detail, clickContext });
   }

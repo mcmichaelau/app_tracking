@@ -12,10 +12,16 @@ func eventCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, re
         return Unmanaged.passUnretained(event)
     }
 
+    if type == .scrollWheel {
+        ScrollWheelCoalescer.shared.ingest(event)
+        return Unmanaged.passUnretained(event)
+    }
+
     guard type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown else {
         return Unmanaged.passUnretained(event)
     }
 
+    ScrollWheelCoalescer.shared.flushIfPending(reason: "mouseDown")
     flushTypingBuffer()
 
     let targetPID = event.getIntegerValueField(.eventTargetUnixProcessID)

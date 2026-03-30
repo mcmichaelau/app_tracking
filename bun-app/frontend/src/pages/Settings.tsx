@@ -26,7 +26,7 @@ export default function Settings() {
     setSaving(true);
     setStatus("idle");
     try {
-      const res = await saveSettings({ openai_api_key: apiKey.trim() || undefined });
+      const res = await saveSettings({ groq_api_key: apiKey.trim() || undefined });
       if (res.ok) {
         setStatus("success");
         setStatusMsg("saved");
@@ -55,9 +55,9 @@ export default function Settings() {
       <div style={cardStyle}>
         <div style={sectionStyle}>
           <div style={labelStyle}>interpretation</div>
-          <div style={fieldLabelStyle}>openai api key</div>
+          <div style={fieldLabelStyle}>interpretation api key</div>
           <div style={fieldSubStyle}>
-            used to generate event interpretations (gpt-5-mini). can also be set via OPENAI_API_KEY in .env
+            OpenAI-compatible chat API (saved as groq key for compatibility). env: INTERPRETATION_LLM=provider/model, GROQ_API_KEY / OPENAI_API_KEY / INTERPRETATION_API_KEY; optional INTERPRETATION_BASE_URL
           </div>
           <div style={inputRowStyle}>
             <div style={inputWrapStyle}>
@@ -65,7 +65,7 @@ export default function Settings() {
                 type={visible ? "text" : "password"}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder={hasKey ? "••••••••" : "sk-..."}
+                placeholder={hasKey ? "••••••••" : "gsk_..."}
                 style={inputStyle}
                 autoComplete="off"
                 spellCheck={false}

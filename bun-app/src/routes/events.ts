@@ -10,7 +10,11 @@ export function eventsRoute(): Hono {
   app.post("/", async (c) => {
     const body = await c.req.json();
     const events = Array.isArray(body) ? body : [body];
-    // logger.event(`received ${events.length} event(s)`, events);
+    for (const ev of events) {
+      if ((ev as { event_type?: string }).event_type === "SCROLL") {
+        logger.event("tracker", ev);
+      }
+    }
     ingest(events);
     return c.json({ ok: true });
   });
