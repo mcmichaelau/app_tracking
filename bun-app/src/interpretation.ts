@@ -1,22 +1,60 @@
 import { join } from "path";
-import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { updateInterpretation, fetchRecentInterpretations } from "./db";
 import {
-  updateInterpretation,
-  assignEventToTask,
-  insertTask,
-  fetchMostRecentTaskWithLastEventTime,
-  fetchRecentInterpretations,
-  fetchTasks,
-  updateTask,
-} from "./db";
-import { loadConfig, INTERPRETATION_MODEL, configDir } from "./config";
-import { logger } from "./logger";
+  completeInterpretation,
+  getInterpretationProvider,
+  invalidateInterpretationClient,
+  resolveApiKeyForProvider,
+} from "./llm";
+import { enqueueForClassification } from "./classification";
 
-const LOGS_DIR = join(configDir, "interpretation_logs");
-const MAX_LOG_FILES = 100;
 const PROMPT_PATH =
   process.env.PROMPT_PATH ??
-  join(import.meta.dir, "..", "..", "prompts", "interpret_events.md");
+  join(import.meta.dir, "..", "..", "prompts", "interpret_event.md");
+
+/** Appended to the system prompt only for CLICK events whose `detail.target` has no usable label-like fields (see `hasGoodClickTarget`). */
+const WEAK_TARGET_PROMPT_PATH =
+  process.env.WEAK_TARGET_PROMPT_PATH ??
+  join(import.meta.dir, "..", "..", "prompts", "click_weak_target.md");
+
+/** Appended for SCROLL events — how to phrase scroll + AX snapshot. */
+const SCROLL_INTERPRET_PROMPT_PATH =
+  process.env.SCROLL_INTERPRET_PROMPT_PATH ??
+  join(import.meta.dir, "..", "..", "prompts", "scroll_interpret.md");
+
+const TARGET_INFORMATIVE_KEYS = [
+  "label",
+  "title",
+  "description",
+  "value",
+  "url",
+  "document",
+  "help",
+  "identifier",
+] as const;
+
+function isMeaningfulString(s: string): boolean {
+  return s.trim().length > 0;
+}
+
+/** True when CLICK JSON `target` has at least one informative field (aligned with the Swift tracker). */
+export function hasGoodClickTarget(detail: string | null): boolean {
+  if (!detail) return false;
+  const trimmed = detail.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const o = JSON.parse(trimmed) as { target?: Record<string, string> };
+    const t = o.target;
+    if (!t || typeof t !== "object") return false;
+    for (const k of TARGET_INFORMATIVE_KEYS) {
+      const v = t[k];
+      if (typeof v === "string" && isMeaningfulString(v)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 interface QueueItem {
   id: number;
@@ -27,384 +65,151 @@ interface QueueItem {
   clickContext?: { app: string; detail: string; timestamp: string } | null;
 }
 
-interface LLMResult {
-  sentence: string;
-  task: {
-    type: "new_task";
-    task_title: string;
-    task_description: string;
-  } | {
-    type: "continue_task";
-    new_task_title: string | null;
-    task_description: string;
+const RECENT_INTERP_LIMIT = 10;
+
+/** Llama 3.1 on Groq often emits non-OpenAI tool syntax; use JSON in message content instead of tool calls. */
+const JSON_OUTPUT_SUFFIX = `
+
+Respond with only a single JSON object and no other text. Shape: {"sentence":"<one interpretation sentence>"}.
+The sentence must follow all interpretation rules above.`;
+
+function parseSentenceFromAssistantContent(content: string | null | undefined): string | null {
+  if (!content) return null;
+  const trimmed = content.trim();
+  const tryParse = (s: string): string | null => {
+    try {
+      const o = JSON.parse(s) as { sentence?: unknown };
+      if (typeof o.sentence === "string") {
+        const t = o.sentence.trim();
+        return t.length > 0 ? t : null;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
   };
+  const direct = tryParse(trimmed);
+  if (direct) return direct;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    const inner = tryParse(fenced[1].trim());
+    if (inner) return inner;
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const inner = tryParse(trimmed.slice(start, end + 1));
+    if (inner) return inner;
+  }
+  return null;
 }
 
-const BATCH_SIZE = 5;
-const BATCH_FLUSH_MS = 4000;
-const TASK_STALE_MS = 10 * 60 * 1000; // 10 minutes
-
-let pendingBatch: QueueItem[] = [];
-let batchTimer: ReturnType<typeof setTimeout> | null = null;
-let isProcessing = false;
-let apiKey: string | null = null;
+let queue: QueueItem[] = [];
+let draining = false;
 let systemPrompt: string | null = null;
+let weakTargetPrompt = "";
+let scrollInterpretPrompt = "";
 
 export async function configure(): Promise<void> {
-  apiKey = process.env.OPENAI_API_KEY ?? loadConfig().openai_api_key ?? null;
-  if (!apiKey) {
-    logger.info("interpretation: no API key — configure in settings");
+  const provider = getInterpretationProvider();
+  if (!resolveApiKeyForProvider(provider)) {
     return;
   }
   try {
     systemPrompt = await Bun.file(PROMPT_PATH).text();
-    logger.info("interpretation: ready");
   } catch {
-    logger.warn(`interpretation: could not load prompt at ${PROMPT_PATH}`);
+    systemPrompt = null;
+  }
+  try {
+    weakTargetPrompt = (await Bun.file(WEAK_TARGET_PROMPT_PATH).text()).trim();
+  } catch {
+    weakTargetPrompt = "";
+  }
+  try {
+    scrollInterpretPrompt = (await Bun.file(SCROLL_INTERPRET_PROMPT_PATH).text()).trim();
+  } catch {
+    scrollInterpretPrompt = "";
   }
 }
 
 export function reconfigure(): void {
-  apiKey = process.env.OPENAI_API_KEY ?? loadConfig().openai_api_key ?? null;
+  invalidateInterpretationClient();
 }
 
-function saveBatchLog(
-  events: QueueItem[],
-  input: { model: string; messages: { role: string; content: string }[] },
-  output: { success: boolean; results?: LLMResult[] | null; raw?: unknown; error?: string }
-): void {
-  try {
-    const timestamp = new Date().toISOString().replace(/:/g, "-");
-    const ids = events.map(e => e.id).join("_");
-    const filename = `${timestamp}_events${ids}.json`;
-    const filepath = join(LOGS_DIR, filename);
-    const payload = {
-      timestamp: new Date().toISOString(),
-      event_ids: events.map(e => e.id),
-      events,
-      input,
-      output,
-    };
-    mkdirSync(LOGS_DIR, { recursive: true });
-    Bun.write(filepath, JSON.stringify(payload, null, 2));
+function formatEventBlock(e: QueueItem): string {
+  let lines = `Type: ${e.event_type}\nApp: ${e.app}\nDetail: ${e.detail ?? ""}`;
+  if (e.clickContext) {
+    lines += `\nClick context (most recent click in ${e.clickContext.app}): ${e.clickContext.detail}`;
+  }
+  return lines;
+}
 
-    const files = readdirSync(LOGS_DIR)
-      .filter((f) => f.endsWith(".json"))
-      .sort();
-    if (files.length > MAX_LOG_FILES) {
-      for (let i = 0; i < files.length - MAX_LOG_FILES; i++) {
-        unlinkSync(join(LOGS_DIR, files[i]));
-      }
+async function callInterpretationModel(event: QueueItem, recentHistory: string[]): Promise<string | null> {
+  const provider = getInterpretationProvider();
+  if (!resolveApiKeyForProvider(provider) || !systemPrompt) return null;
+
+  const scrollBlock =
+    event.event_type === "SCROLL" && scrollInterpretPrompt.length > 0
+      ? `\n\n${scrollInterpretPrompt}`
+      : "";
+
+  const weakBlock =
+    (event.event_type === "CLICK" || event.event_type === "SCROLL") &&
+    !hasGoodClickTarget(event.detail) &&
+    weakTargetPrompt.length > 0
+      ? `\n\n${weakTargetPrompt}`
+      : "";
+
+  let userMessage = `Interpret this single event:\n\n${formatEventBlock(event)}`;
+  if (recentHistory.length > 0) {
+    userMessage += `\n\nRecent interpreted activity before this event (oldest first):\n${recentHistory.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
+  }
+
+  const system = systemPrompt + scrollBlock + weakBlock + JSON_OUTPUT_SUFFIX;
+
+  try {
+    const result = await completeInterpretation({
+      provider,
+      system,
+      user: userMessage,
+    });
+
+    const sentence = parseSentenceFromAssistantContent(result.content);
+    if (!sentence) {
+      return null;
     }
-  } catch (e) {
-    logger.warn(`interpretation: failed to save log: ${(e as Error).message}`);
+    return sentence;
+  } catch (_e: unknown) {
+    return null;
   }
 }
 
-function scheduledFlush(): void {
-  batchTimer = null;
-  maybeFlush();
+async function processOne(item: QueueItem): Promise<void> {
+  const recentHistory = fetchRecentInterpretations(RECENT_INTERP_LIMIT, item.id);
+  const sentence = await callInterpretationModel(item, recentHistory);
+  if (sentence) {
+    updateInterpretation(item.id, sentence);
+    enqueueForClassification({ id: item.id, timestamp: item.timestamp, interpretation: sentence });
+  }
 }
 
-function maybeFlush(): void {
-  if (isProcessing || pendingBatch.length === 0) return;
-  isProcessing = true;
-  if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
-
-  const batch = pendingBatch.splice(0, BATCH_SIZE);
-  processBatch(batch).finally(() => {
-    isProcessing = false;
-    if (pendingBatch.length >= BATCH_SIZE) {
-      maybeFlush();
-    } else if (pendingBatch.length > 0 && !batchTimer) {
-      batchTimer = setTimeout(scheduledFlush, BATCH_FLUSH_MS);
+async function drain(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  try {
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      await processOne(item);
     }
-  });
+  } finally {
+    draining = false;
+    if (queue.length > 0) void drain();
+  }
 }
 
 export function enqueue(item: QueueItem): void {
-  if (!apiKey || !systemPrompt) return;
-  pendingBatch.push(item);
-  if (pendingBatch.length >= BATCH_SIZE) {
-    maybeFlush();
-  } else if (!batchTimer && !isProcessing) {
-    batchTimer = setTimeout(scheduledFlush, BATCH_FLUSH_MS);
-  }
-}
-
-async function processBatch(events: QueueItem[]): Promise<void> {
-  const recentTaskData = fetchMostRecentTaskWithLastEventTime();
-  let activeTask: { id: number; title: string; description: string } | null = null;
-
-  if (recentTaskData?.lastEventTime) {
-    const lastEventMs = new Date(recentTaskData.lastEventTime).getTime();
-    const firstEventMs = new Date(events[0].timestamp).getTime();
-    if (firstEventMs - lastEventMs <= TASK_STALE_MS) {
-      activeTask = recentTaskData.task;
-    }
-  }
-
-  const recentHistory = fetchRecentInterpretations(10);
-  const recentTasks = fetchTasks(2);
-  const results = await callOpenAI(events, activeTask, recentHistory, recentTasks);
-  if (!results || results.length !== events.length) return;
-
-  // Process results in order, maintaining running task state so mid-batch
-  // task boundaries are handled correctly (e.g. new_task at event 3 of 5).
-  let currentTask: { id: number; title: string; description: string } | null = activeTask;
-
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i];
-    const result = results[i];
-
-    updateInterpretation(event.id, result.sentence);
-
-    if (result.task.type === "new_task") {
-      const taskId = insertTask({
-        title: result.task.task_title,
-        description: result.task.task_description,
-      });
-      assignEventToTask(event.id, taskId);
-      currentTask = { id: taskId, title: result.task.task_title, description: result.task.task_description };
-      logger.info("interpretation: created new task", { taskId, title: result.task.task_title });
-    } else {
-      if (currentTask) {
-        const updates: { title?: string; description?: string } = {};
-        if (result.task.new_task_title) updates.title = result.task.new_task_title;
-        if (result.task.task_description) updates.description = result.task.task_description;
-        if (Object.keys(updates).length > 0) {
-          updateTask(currentTask.id, updates);
-          currentTask = {
-            ...currentTask,
-            title: updates.title ?? currentTask.title,
-            description: updates.description ?? currentTask.description,
-          };
-        }
-        assignEventToTask(event.id, currentTask.id);
-        logger.info("interpretation: continued task", { taskId: currentTask.id });
-      } else {
-        // No prior task — create one from the continue_task data
-        const taskId = insertTask({
-          title: result.task.new_task_title ?? "Untitled Task",
-          description: result.task.task_description ?? "",
-        });
-        assignEventToTask(event.id, taskId);
-        currentTask = {
-          id: taskId,
-          title: result.task.new_task_title ?? "Untitled Task",
-          description: result.task.task_description ?? "",
-        };
-        logger.info("interpretation: created task (no previous)", { taskId });
-      }
-    }
-  }
-}
-
-async function callOpenAI(
-  events: QueueItem[],
-  activeTask: { id: number; title: string; description: string } | null,
-  recentHistory: string[],
-  recentTasks: { id: number; title: string; description: string }[]
-): Promise<LLMResult[] | null> {
-  if (!apiKey || !systemPrompt) return null;
-
-  const eventLines = events.map((e, i) => {
-    let lines = `Event ${i + 1}:\nType: ${e.event_type}\nApp: ${e.app}\nDetail: ${e.detail ?? ""}`;
-    if (e.clickContext) {
-      lines += `\nClick context (most recent click in ${e.clickContext.app}): ${e.clickContext.detail}`;
-    }
-    return lines;
-  }).join("\n\n");
-
-  let userMessage = `Events to interpret (${events.length} event${events.length > 1 ? "s" : ""}, in order):\n\n${eventLines}`;
-
-  if (recentHistory.length > 0) {
-    userMessage += `\n\nRecent activity (last ${recentHistory.length} events before this batch, oldest first):\n${recentHistory.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
-  }
-  // Show last 2 tasks for context, marking the active one as current
-  if (recentTasks.length > 0) {
-    const taskLines = recentTasks.map((t, i) => {
-      const label = i === 0 ? "Current task" : "Previous task";
-      const stale = activeTask === null && i === 0 ? " (stale — no active task)" : "";
-      return `${label}${stale}:\nTitle: ${t.title}\nDescription: ${t.description}`;
-    }).join("\n\n");
-    userMessage += `\n\n${taskLines}`;
-    if (activeTask === null) {
-      userMessage += `\n\nNo active task (last task is stale). You must create a new task for the first event.`;
-    }
-  } else {
-    userMessage += `\n\nNo current task exists. You must create a new task for the first event.`;
-  }
-
-  const logInput = { model: INTERPRETATION_MODEL, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }] };
-  const body = {
-    model: INTERPRETATION_MODEL,
-    instructions: systemPrompt,
-    input: userMessage,
-    tools: [{
-      type: "function" as const,
-      name: "save_interpretations",
-      description: "Saves interpretations and task assignments for a batch of user activity events.",
-      parameters: {
-        type: "object",
-        properties: {
-          events: {
-            type: "array",
-            description: "One interpretation per event, in the same order as the input.",
-            items: {
-              type: "object",
-              properties: {
-                sentence: {
-                  type: "string",
-                  description: "A specific, detailed sentence describing what the user did.",
-                },
-                task: {
-                  type: "object",
-                  description: "Task assignment for this event.",
-                  properties: {
-                    type: {
-                      type: "string",
-                      enum: ["new_task", "continue_task"],
-                      description: "Whether to create a new task or continue the current one.",
-                    },
-                    task_title: {
-                      type: "string",
-                      description: "For new_task: title of the new task.",
-                    },
-                    task_description: {
-                      type: "string",
-                      description: "For new_task: goal description. For continue_task: complete replacement description reflecting the full goal.",
-                    },
-                    new_task_title: {
-                      type: "string",
-                      description: "For continue_task: refined title when intent has become clearer mid-batch (e.g. 'Opening new tab' → 'Shopping for Dickies 874 pants'). Null to keep current title.",
-                    },
-                  },
-                  required: ["type"],
-                },
-              },
-              required: ["sentence", "task"],
-            },
-          },
-        },
-        required: ["events"],
-      },
-    }],
-    tool_choice: { type: "function" as const, name: "save_interpretations" },
-    reasoning: { effort: "low" as const },
-    text: { verbosity: "medium" as const },
-    max_output_tokens: 2000,
-  };
-
-  try {
-    const res = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120000),
-    });
-
-    const rawResponse = await res.json().catch(() => null);
-
-    if (!res.ok) {
-      const errBody = typeof rawResponse === "object" ? JSON.stringify(rawResponse) : String(rawResponse);
-      logger.warn(`interpretation: HTTP ${res.status} for batch [${events.map(e => e.id).join(",")}]: ${errBody}`);
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: rawResponse,
-        error: `HTTP ${res.status}: ${errBody}`,
-      });
-      return null;
-    }
-
-    const json = rawResponse as { output?: Array<{ type?: string; name?: string; arguments?: string }> };
-    const toolCall = json?.output?.find((o) => o.type === "function_call");
-    const argsStr = toolCall?.arguments;
-    if (!argsStr) {
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: json,
-        error: "No tool call in response",
-      });
-      return null;
-    }
-
-    const args = JSON.parse(argsStr) as Record<string, unknown>;
-    const rawEvents = args.events as Array<Record<string, unknown>>;
-    logger.info("interpretation: llm_response", {
-      eventIds: events.map(e => e.id),
-      model: INTERPRETATION_MODEL,
-      resultCount: rawEvents?.length,
-    });
-
-    if (!Array.isArray(rawEvents) || rawEvents.length !== events.length) {
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: args,
-        error: `Expected ${events.length} results, got ${rawEvents?.length}`,
-      });
-      return null;
-    }
-
-    const results: LLMResult[] = [];
-    for (const item of rawEvents) {
-      if (!item?.sentence || !(item.task as Record<string, unknown>)?.type) {
-        saveBatchLog(events, logInput, {
-          success: false,
-          raw: args,
-          error: "Missing sentence or task type in item",
-        });
-        return null;
-      }
-
-      const sentence = String(item.sentence).trim();
-      const t = item.task as Record<string, unknown>;
-      const taskType = t.type;
-
-      if (taskType === "new_task") {
-        results.push({
-          sentence,
-          task: {
-            type: "new_task",
-            task_title: (t.task_title as string) ?? "Untitled",
-            task_description: (t.task_description as string) ?? "",
-          },
-        });
-      } else if (taskType === "continue_task") {
-        results.push({
-          sentence,
-          task: {
-            type: "continue_task",
-            new_task_title: (t.new_task_title as string | null) ?? null,
-            task_description: (t.task_description as string) ?? "",
-          },
-        });
-      } else {
-        saveBatchLog(events, logInput, {
-          success: false,
-          raw: args,
-          error: `Unknown task type: ${taskType}`,
-        });
-        return null;
-      }
-    }
-
-    saveBatchLog(events, logInput, {
-      success: true,
-      results,
-      raw: args,
-    });
-    return results;
-  } catch (e: unknown) {
-    const errMsg = (e as Error).message;
-    logger.warn(`interpretation: request failed for batch [${events.map(ev => ev.id).join(",")}]: ${errMsg}`);
-    saveBatchLog(events, logInput, {
-      success: false,
-      error: errMsg,
-    });
-    return null;
-  }
+  if (item.event_type === "TYPING") return;
+  if (!resolveApiKeyForProvider(getInterpretationProvider()) || !systemPrompt) return;
+  queue.push(item);
+  void drain();
 }

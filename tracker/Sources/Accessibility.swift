@@ -53,6 +53,8 @@ import Foundation
 //     "siblings": [ { "title": "Reply" }, { "title": "Forward" } ],
 //     "context":  [ { "role": "AXWebArea", "url": "https://..." }, ... ]
 //   }
+//   `target` is omitted when AX resolves to a blank generic container (e.g. bare AXGroup)
+//   after walking the tree for a real label.
 //   toDisplayString() returns a short human-readable summary:
 //   "<label> — <first context title/url>"
 
@@ -344,7 +346,10 @@ public struct ClickData {
     public var context: [[String: String]]   // ancestor hierarchy (where in the UI)
 
     public func toJSON() -> String {
-        var dict: [String: Any] = ["target": target]
+        var dict: [String: Any] = [:]
+        if !target.isEmpty {
+            dict["target"] = target
+        }
         if !siblings.isEmpty {
             dict["siblings"] = siblings
         }
@@ -359,9 +364,21 @@ public struct ClickData {
     }
 
     public func toDisplayString() -> String {
-        let label = target["label"] ?? target["title"] ?? target["description"] ?? target["role"] ?? "unknown"
+        let fromTarget = target["label"] ?? target["title"] ?? target["description"] ?? target["value"]
+        let label: String
+        if let t = fromTarget, isMeaningfulString(t) {
+            label = t
+        } else if let c = context.first,
+                  let cl = c["title"] ?? c["description"] ?? c["url"], isMeaningfulString(cl) {
+            label = cl
+        } else if let s = siblings.first {
+            label = s["title"] ?? s["value"] ?? s["help"] ?? s["description"] ?? target["role"] ?? "click"
+        } else {
+            label = target["role"] ?? "click"
+        }
         if let firstContext = context.first,
-           let contextLabel = firstContext["title"] ?? firstContext["description"] ?? firstContext["url"] {
+           let contextLabel = firstContext["title"] ?? firstContext["description"] ?? firstContext["url"],
+           isMeaningfulString(contextLabel), contextLabel != label {
             return "\(label) — \(contextLabel)"
         }
         return label
@@ -406,10 +423,18 @@ private func extractSemanticFields(_ el: AXUIElement) -> [String: String] {
     return fields
 }
 
+/// True if there is user-facing text worth recording (whitespace-only does not count).
+private func isMeaningfulString(_ s: String) -> Bool {
+    !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+}
+
 private func hasSemanticContent(_ fields: [String: String]) -> Bool {
     // identifier is not considered semantic content (it's a developer ID, not user-facing)
     let semanticKeys: Set<String> = ["title", "description", "value", "url", "document", "help"]
-    return fields.keys.contains { semanticKeys.contains($0) }
+    for key in fields.keys where semanticKeys.contains(key) {
+        if let v = fields[key], isMeaningfulString(v) { return true }
+    }
+    return false
 }
 
 // MARK: - Child content extraction
@@ -463,7 +488,7 @@ private func summarizeElement(_ el: AXUIElement) -> [String: String]? {
     let fields = extractSemanticFields(el)
     if hasSemanticContent(fields) { return fields }
     // Blank container — flatten children text into a single summary value
-    let childTexts = extractChildContent(el, depth: 0, maxDepth: 2)
+    let childTexts = extractChildContent(el, depth: 0, maxDepth: 4)
         .compactMap { $0["value"] ?? $0["title"] ?? $0["description"] }
     guard !childTexts.isEmpty else { return nil }
     return ["value": childTexts.prefix(4).joined(separator: " · ")]
@@ -557,39 +582,80 @@ public func getClickData(at point: CGPoint) -> ClickData? {
 
     let siblingsContent = cleanFields(extractSiblings(el))
 
-    // If target has no label, try children first, then walk up the tree
+    // If target has no label, try summarizing the hit element, then children, then walk ancestors
     if targetFields["label"] == nil && !hasSemanticContent(targetFields) {
-        // 1. Try children
-        let childTexts = extractChildContent(el, depth: 0, maxDepth: 3)
+        if let summary = summarizeElement(el) {
+            let v = summary["value"] ?? summary["title"] ?? summary["description"] ?? ""
+            if isMeaningfulString(v) {
+                targetFields["label"] = v
+            }
+        }
+    }
+
+    if targetFields["label"] == nil && !hasSemanticContent(targetFields) {
+        // 1. Try children (deeper than summarizeElement for stubborn nested layouts)
+        let childTexts = extractChildContent(el, depth: 0, maxDepth: 5)
             .compactMap { $0["value"] ?? $0["title"] ?? $0["description"] }
             .filter { text in
                 let trimmed = text.trimmingCharacters(in: .whitespaces)
-                return trimmed.count > 1 && !noiseStrings.contains(trimmed)
+                return isMeaningfulString(trimmed) && !noiseStrings.contains(trimmed)
             }
             .prefix(4)
         if !childTexts.isEmpty {
             targetFields["label"] = childTexts.joined(separator: " · ")
         } else {
-            // 2. Walk up the tree until we find a useful ancestor label
+            // 2. Walk up the tree: role-aware label, container summaries, then common AX attrs
             var current = el
             for _ in 0..<12 {
                 guard let parent = getParent(current) else { break }
+                let parentRole = getAttr(parent, kAXRoleAttribute as CFString) ?? ""
+                if parentRole == "AXApplication" {
+                    current = parent
+                    continue
+                }
+                if let lab = labelForElement(parent), isMeaningfulString(lab) {
+                    targetFields["label"] = lab
+                    break
+                }
+                if let summary = summarizeElement(parent) {
+                    let v = summary["value"] ?? summary["title"] ?? summary["description"] ?? ""
+                    if isMeaningfulString(v) {
+                        targetFields["label"] = v
+                        break
+                    }
+                }
                 let parentFields = extractSemanticFields(parent)
-                if let title = parentFields["title"], title.count > 1 {
+                if let title = parentFields["title"], isMeaningfulString(title) {
                     targetFields["label"] = title
                     break
                 }
-                if let desc = parentFields["description"], desc.count > 1 {
+                if let desc = parentFields["description"], isMeaningfulString(desc) {
                     targetFields["label"] = desc
                     break
                 }
-                if let url = parentFields["url"], url.count > 1 {
+                if let url = parentFields["url"], isMeaningfulString(url) {
                     targetFields["label"] = url
+                    break
+                }
+                if let help = parentFields["help"], isMeaningfulString(help) {
+                    targetFields["label"] = help
+                    break
+                }
+                if let doc = parentFields["document"], isMeaningfulString(doc) {
+                    targetFields["label"] = doc
                     break
                 }
                 current = parent
             }
         }
+    }
+
+    // Drop useless targets: only a generic container role with no user-facing fields
+    let informativeKeys: Set<String> = ["label", "title", "description", "value", "url", "document", "help", "identifier"]
+    let hasInformativeField = informativeKeys.contains { k in targetFields[k].map { isMeaningfulString($0) } ?? false }
+    let roleOnly = targetFields["role"].map { genericRoles.contains($0) } ?? false
+    if !hasInformativeField && roleOnly {
+        targetFields = [:]
     }
     
     var contextNodes: [[String: String]] = []
@@ -647,4 +713,35 @@ public func getClickData(at point: CGPoint) -> ClickData? {
 func getClickedElement(at point: CGPoint) -> String? {
     guard let clickData = getClickData(at: point) else { return nil }
     return clickData.toDisplayString()
+}
+
+// MARK: - Scroll (AX snapshot at cursor after idle)
+
+private func scrollStopJSONString(from dict: [String: Any]) -> String? {
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]) else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
+/// After a scroll session ends, snapshot the element under the cursor — same `target` / `siblings` / `context` pipeline as clicks. `motion` aggregates wheel deltas over the session.
+public func getScrollLogPayload(at point: CGPoint, motion: [String: Any]) -> (detail: String, display: String) {
+    guard let data = getClickData(at: point) else {
+        let err: [String: Any] = [
+            "kind": "scroll",
+            "at": ["x": Double(point.x), "y": Double(point.y)],
+            "error": "no_ax_element",
+            "motion": motion,
+        ]
+        let detail = scrollStopJSONString(from: err) ?? "{}"
+        return (detail, "scrolled — (no accessibility)")
+    }
+    var dict: [String: Any] = [
+        "kind": "scroll",
+        "at": ["x": Double(point.x), "y": Double(point.y)],
+        "motion": motion,
+    ]
+    if !data.target.isEmpty { dict["target"] = data.target }
+    if !data.siblings.isEmpty { dict["siblings"] = data.siblings }
+    if !data.context.isEmpty { dict["context"] = data.context }
+    let detail = scrollStopJSONString(from: dict) ?? data.toJSON()
+    return (detail, data.toDisplayString())
 }

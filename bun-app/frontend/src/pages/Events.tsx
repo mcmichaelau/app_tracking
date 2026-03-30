@@ -5,6 +5,7 @@ import { DataTable, cellStyles, type Column } from "../components/DataTable";
 const TYPE_COLORS: Record<string, string> = {
   CLICK: "#0a84ff",
   TYPING: "#30d158",
+  SCROLL: "#98989d",
   COPY: "#ff9f0a",
   PASTE: "#ff9f0a",
   SHORTCUT: "#bf5af2",

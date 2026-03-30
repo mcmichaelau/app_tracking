@@ -62,11 +62,11 @@
   <div class="card">
     <div class="card-section">
       <div class="section-label">interpretation</div>
-      <div class="field-label">openai api key</div>
-      <div class="field-sub">used to generate event interpretations (gpt-5-mini). can also be set via OPENAI_API_KEY in .env</div>
+      <div class="field-label">interpretation api key</div>
+      <div class="field-sub">OpenAI-compatible chat API. env: INTERPRETATION_LLM=provider/model, keys: GROQ_API_KEY / OPENAI_API_KEY / INTERPRETATION_API_KEY; optional INTERPRETATION_BASE_URL</div>
       <div class="input-row">
         <div class="input-wrap">
-          <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" spellcheck="false">
+          <input type="password" id="api-key" placeholder="gsk_..." autocomplete="off" spellcheck="false">
           <button class="vis-btn" id="vis-btn">◎</button>
         </div>
         <button class="btn primary" id="save-btn">save</button>
@@ -98,7 +98,7 @@ async function load() {
   try {
     const data = await fetch('/api/settings').then(r => r.json());
     hasExistingKey = data.has_key;
-    input.placeholder = data.has_key ? data.openai_api_key : 'sk-...';
+    input.placeholder = data.has_key ? data.groq_api_key : 'gsk_...';
   } catch { setStatus('error', 'could not connect to server'); }
 }
 
@@ -107,7 +107,7 @@ saveBtn.addEventListener('click', async () => {
   if (!key && !hasExistingKey) return;
   saveBtn.disabled = true; saveBtn.textContent = 'saving...';
   try {
-    const res = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ openai_api_key: key }) });
+    const res = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groq_api_key: key }) });
     if (res.ok) { setStatus('success', 'saved'); input.value = ''; await load(); }
     else setStatus('error', 'failed to save');
   } catch { setStatus('error', 'could not connect to server'); }

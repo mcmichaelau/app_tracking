@@ -144,10 +144,13 @@ export function fetchEvents(options: {
   return db.prepare(sql).all(...params) as RawEvent[];
 }
 
-export function fetchRecentInterpretations(limit = 10): string[] {
-  const rows = db.prepare(
-    "SELECT interpretation FROM raw_events WHERE interpretation IS NOT NULL ORDER BY id DESC LIMIT ?"
-  ).all(limit) as { interpretation: string }[];
+export function fetchRecentInterpretations(limit = 10, excludeEventId?: number): string[] {
+  const sql = excludeEventId != null
+    ? "SELECT interpretation FROM raw_events WHERE interpretation IS NOT NULL AND id != ? ORDER BY id DESC LIMIT ?"
+    : "SELECT interpretation FROM raw_events WHERE interpretation IS NOT NULL ORDER BY id DESC LIMIT ?";
+  const rows = excludeEventId != null
+    ? (db.prepare(sql).all(excludeEventId, limit) as { interpretation: string }[])
+    : (db.prepare(sql).all(limit) as { interpretation: string }[]);
   return rows.map(r => r.interpretation).reverse();
 }
 

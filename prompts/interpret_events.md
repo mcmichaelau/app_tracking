@@ -7,7 +7,8 @@ You see the full batch before classifying any event. Use this lookahead to your 
 </system>
 
 <event_types>
-- CLICK — User clicked something. `detail` is JSON with `target`, `siblings`, and `context`.
+- CLICK — User clicked something. `detail` is JSON that may include `target`, `siblings`, and `context` (any subset).
+- SCROLL — User finished scrolling; `detail` is an Accessibility snapshot at the cursor (`kind: "scroll"`, `at`, plus `target` / `siblings` / `context` when resolved). Live interpreter appends `scroll_interpret.md` and may append `click_weak_target.md` when `target` is weak.
 - TYPING — Buffered keystrokes flushed before a special key or click. `detail` is the typed text.
 - KEY — Special key: ↵ Enter, ⎋ Escape, ⇥ Tab, ⌫ Backspace, arrow keys, etc.
 - PASTE — User pasted clipboard content. `detail` is the pasted text (truncated to 100 chars).
@@ -17,14 +18,16 @@ You see the full batch before classifying any event. Use this lookahead to your 
 </event_types>
 
 <click_json_structure>
-Each CLICK `detail` has three fields:
+Each CLICK `detail` may include these fields:
 
-- `target` — The clicked element. Always has `role`. Usually has `label` (synthesized from the element or its children — trust it even when role is a generic AXGroup). May also have `title`, `description`, `value`, `url`.
+- `target` — The clicked element when present. Usually includes `label` (synthesized from the element or its children). May also have `role`, `title`, `description`, `value`, `url`.
 - `siblings` — Other items in the same UI container. Use to understand *where* in the UI the click happened (e.g. other tabs, other Slack conversations, other list items).
 - `context` — Ancestor elements from nearest to farthest. Use to identify *what screen* the click was in.
   - `{"role":"AXWebArea","title":"Page Title"}` → the web page
   - `{"role":"AXWindow","document":"https://..."}` → browser window with URL
   - `{"role":"AXList","description":"Recent conversations"}` → Slack sidebar list
+
+*(Runtime note: the live interpreter appends `prompts/click_weak_target.md` to the system prompt only when a CLICK’s `target` has no usable label-like fields — same idea should apply if you batch-interpret CLICKs.)*
 </click_json_structure>
 
 <interpretation_rules>
@@ -33,7 +36,7 @@ Each CLICK `detail` has three fields:
 - Use the exact text from `target.label`, typed content, page titles, email subjects, Slack channel names, URLs, etc.
 - `siblings` tells you what list/section the click was in (other tabs, other DMs, other search results)
 - `context` tells you what screen/page the click was in
-- Tab clicks in Chrome: blank `AXGroup` with label synthesized from the window title; siblings show other open tabs
+- Tab clicks in Chrome: `target` may include a label from the window title; siblings show other open tabs
 - TYPING + KEY ↵ = typed and submitted
 - COPY + (navigate) + PASTE = copied from one place and pasted to another
 
