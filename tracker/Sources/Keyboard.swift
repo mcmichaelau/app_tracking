@@ -2,6 +2,7 @@ import Cocoa
 import CoreGraphics
 
 func flushTypingBuffer() {
+    ScrollWheelCoalescer.shared.flushIfPending(reason: "typing_buffer")
     let state = TrackerState.shared
     state.typingFlushTimer?.invalidate()
     state.typingFlushTimer = nil

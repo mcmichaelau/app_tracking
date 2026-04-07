@@ -5,6 +5,7 @@ import { DataTable, cellStyles, type Column } from "../components/DataTable";
 const TYPE_COLORS: Record<string, string> = {
   CLICK: "#0a84ff",
   TYPING: "#30d158",
+  SCROLL: "#98989d",
   COPY: "#ff9f0a",
   PASTE: "#ff9f0a",
   SHORTCUT: "#bf5af2",
@@ -15,6 +16,7 @@ const TYPE_COLORS: Record<string, string> = {
 interface RawEvent {
   id: number;
   timestamp: string;
+  timestamp_local?: string;
   app: string;
   event_type: string;
   detail: string | null;
@@ -40,7 +42,7 @@ function dateRange(filter: string) {
 }
 
 const columns: Column<RawEvent>[] = [
-  { key: "timestamp", header: "timestamp", render: (e) => formatTime(e.timestamp), style: cellStyles.text2, width: 110 },
+  { key: "timestamp", header: "timestamp", render: (e) => formatTime(e.timestamp_local ?? e.timestamp), style: cellStyles.text2, width: 110 },
   {
     key: "type",
     header: "type",

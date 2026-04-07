@@ -4,14 +4,20 @@
   "scripts": {
     "start": "bun --hot run src/index.ts",
     "start:ui": "cd frontend && bun install && bun run build && cd .. && bun --hot run src/index.ts",
-    "dev": "concurrently -n api,ui -c blue,magenta \"bun --hot run src/index.ts\" \"cd frontend && npm run dev\"",
+    "dev": "bunx concurrently -n api,ui -c blue,magenta \"bun --hot run src/index.ts\" \"cd frontend && npm run dev\"",
+    "dev:all": "cd ../tracker && swift build -c release && cd ../bun-app && bun install && cd frontend && bun install && cd .. && bunx concurrently --kill-others-on-fail -n api,ui,tracker -c blue,magenta,green \"bun --hot run src/index.ts\" \"cd frontend && bun run dev\" \"cd ../tracker && .build/release/ActivityTracker\"",
+    "build:macos-app": "bash ../scripts/build-macos-app.sh",
+    "release:macos": "bash ../scripts/release-macos.sh",
     "restart": "lsof -ti :3001 | xargs kill -9 2>/dev/null; bun --hot run src/index.ts",
     "build": "cd frontend && bun install && bun run build",
     "dev:ui": "cd frontend && bun run dev"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
-    "hono": "^4.12.8"
+    "@anthropic-ai/sdk": "^0.81.0",
+    "@google/generative-ai": "^0.24.1",
+    "hono": "^4.12.8",
+    "openai": "^6.33.0",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/bun": "^1.3.10",

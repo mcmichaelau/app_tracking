@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { ChatCompletionMessageParam } from "openai";
 import { logger } from "../logger";
-import { dbPath } from "../db";
+import { getResolvedUserTimezone, localCalendarDateInZone } from "../timezone";
+import { runInsightsAgent } from "../insightsAgent/runner";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -9,20 +10,41 @@ interface ChatMessage {
 }
 
 interface ChatSession {
-  sessionId: string | null;
+  openaiMessages: ChatCompletionMessageParam[];
   messages: ChatMessage[];
 }
 
 const sessions = new Map<string, ChatSession>();
 
+const MAX_HISTORY_MESSAGES = 48;
+
+function buildSystemPrompt(): string {
+  const tz = getResolvedUserTimezone();
+  const todayLocal = localCalendarDateInZone(new Date().toISOString(), tz);
+
+  return `You are an activity-insights assistant. The user's activity is stored in SQLite. Use the read_query tool only for SELECT queries — writes are blocked by the app.
+
+IMPORTANT:
+- Always use LIMIT in read_query (max 100 rows).
+- The user's timezone is ${tz}. Today's local calendar date is ${todayLocal} (same zone).
+- Column "timestamp_local" is wall-clock time in that timezone (format YYYY-MM-DDTHH:MM:SS.mmm, no suffix). Use it for "today", "this morning", afternoon, and human-facing clock times.
+- Column "timestamp" is ISO 8601 UTC (…Z). Use it for instant ordering or rolling windows, e.g. last 10 minutes: WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', datetime('now', '-10 minutes'))
+- For local calendar filters, use "timestamp_local":
+  - today: WHERE date(timestamp_local) = '${todayLocal}'
+  - this morning: WHERE date(timestamp_local) = '${todayLocal}' AND time(timestamp_local) >= '05:00:00' AND time(timestamp_local) < '12:00:00' (adjust if the user specifies different bounds)
+- When describing times to the user, use clock times from "timestamp_local", not raw UTC from "timestamp".
+
+Allowed columns on raw_events only: timestamp_local, timestamp, interpretation. Do not select id, app, event_type, or detail.
+
+Answer in concise markdown. Avoid extra blank lines between list items or short paragraphs.`;
+}
+
 export function agentRoute(): Hono {
   const app = new Hono();
 
-  // POST /api/agent/chat — Send a message to the Claude agent
-  // Supports SSE streaming for real-time responses
   app.post("/chat", async (c) => {
-    const body = await c.req.json() as { 
-      message: string; 
+    const body = await c.req.json() as {
+      message: string;
       conversationId?: string;
     };
 
@@ -32,9 +54,9 @@ export function agentRoute(): Hono {
 
     const conversationId = body.conversationId || crypto.randomUUID();
     let session = sessions.get(conversationId);
-    
+
     if (!session) {
-      session = { sessionId: null, messages: [] };
+      session = { openaiMessages: [], messages: [] };
       sessions.set(conversationId, session);
     }
 
@@ -42,191 +64,59 @@ export function agentRoute(): Hono {
 
     const stream = new ReadableStream({
       async start(controller) {
+        const sse = (payload: object) =>
+          controller.enqueue(
+            `data: ${JSON.stringify({ ...payload, conversationId })}\n\n`,
+          );
+
         try {
-          let fullResponse = "";
-          let capturedSessionId: string | null = session!.sessionId;
+          const history = session!.openaiMessages.slice(-MAX_HISTORY_MESSAGES);
 
-          const queryOptions: any = {
-            model: "claude-haiku-4-5",
-            mcpServers: {
-              tracker: {
-                command: "npx",
-                args: ["-y", "mcp-server-sqlite-npx", dbPath],
-              },
+          const { assistantText, appendMessages } = await runInsightsAgent({
+            systemPrompt: buildSystemPrompt(),
+            userMessage: body.message,
+            history,
+            emit: (ev) => {
+              if (ev.type === "text") {
+                sse({ type: "text", content: ev.content });
+              } else if (ev.type === "tool_use") {
+                sse({ type: "tool_use", tool: ev.tool, toolInput: ev.toolInput });
+              } else if (ev.type === "tool_result") {
+                sse({ type: "tool_result", content: ev.content });
+              } else if (ev.type === "result") {
+                sse({ type: "result", turns: ev.turns });
+              }
             },
-            allowedTools: [
-              "mcp__tracker__read_query",
-              "mcp__tracker__list_tables",
-              "mcp__tracker__describe_table",
-            ],
-            disallowedTools: ["Bash", "Read", "Write", "Edit", "WebSearch", "WebFetch", "Glob", "Grep"],
-            debug: true,
-            stderr: (data: string) => logger.info("agent:stderr", { data: data.trim() }),
-          };
+          });
 
-          if (capturedSessionId) {
-            queryOptions.resume = capturedSessionId;
-          }
+          session!.openaiMessages.push(...appendMessages);
+          session!.openaiMessages = session!.openaiMessages.slice(-MAX_HISTORY_MESSAGES);
 
-          const systemContext = `You have access to an SQLite database (via MCP server "tracker") containing activity tracking data. Use read_query for SELECT only (writes are disabled).
-
-IMPORTANT:
-- Always use LIMIT in your queries (max 100 rows). Never query without a LIMIT clause.
-- Timestamps are stored in ISO 8601 UTC format (e.g. 2026-03-17T16:11:00.000Z). For time-range filters, use strftime so the cutoff matches this format. Example for "last 10 minutes": \`WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-10 minutes'))\`. Never use datetime('now') or datetime('now', '-10 minutes') directly in comparisons—the format would be wrong.
-
-Available table:
-- raw_events: you may ONLY query the "timestamp" and "interpretation" columns. Do NOT select or reference any other columns (app, event_type, detail are off-limits).`;
-
-          logger.info("agent:start", { conversationId, prompt: body.message.slice(0, 80) });
-
-          // Track tool IDs from internal SDK tools to suppress their results
-          const suppressedToolIds = new Set<string>();
-
-          for await (const message of query({
-            prompt: body.message,
-            options: {
-              ...queryOptions,
-              systemPrompt: systemContext,
-            },
-          })) {
-            // Log every message for debugging
-            const msg = message as any;
-            const msgType = msg.type + (msg.subtype ? `:${msg.subtype}` : "");
-            const logData: Record<string, unknown> = { type: msgType };
-
-            if (msg.type === "assistant" && msg.message?.content) {
-              const blocks = msg.message.content;
-              if (Array.isArray(blocks)) {
-                for (const b of blocks) {
-                  if (b.type === "text") logData.text = b.text.slice(0, 120);
-                  if (b.type === "tool_use") logData.tool = { name: b.name, input: b.input };
-                }
-              }
-              logData.stopReason = msg.message.stop_reason;
-            } else if (msg.type === "user" && msg.message?.content) {
-              const blocks = msg.message.content;
-              if (Array.isArray(blocks)) {
-                for (const b of blocks) {
-                  if (b.type === "tool_result") logData.toolResult = { id: b.tool_use_id, content: typeof b.content === "string" ? b.content.slice(0, 200) : "(structured)" };
-                }
-              }
-            } else if (msg.type === "result") {
-              logData.subtype = msg.subtype;
-              logData.result = typeof msg.result === "string" ? msg.result.slice(0, 200) : undefined;
-              logData.cost = msg.total_cost_usd;
-              logData.turns = msg.num_turns;
-            }
-
-            logger.info("agent:msg", logData);
-
-            // Capture session ID from init message
-            if (message.type === "system" && message.subtype === "init") {
-              capturedSessionId = (message as any).session_id;
-              session!.sessionId = capturedSessionId;
-              const mcpStatus = (message as any).mcp_servers;
-              if (mcpStatus) logger.info("agent:mcp_init", { mcp_servers: mcpStatus });
-            }
-
-            // Stream assistant content (text + tool calls)
-            if (msg.type === "assistant" && msg.message?.content) {
-              const blocks = msg.message.content;
-              if (Array.isArray(blocks)) {
-                for (const block of blocks) {
-                  if (block.type === "text" && block.text) {
-                    fullResponse += block.text;
-                    controller.enqueue(`data: ${JSON.stringify({ 
-                      type: "text", 
-                      content: block.text,
-                      conversationId 
-                    })}\n\n`);
-                  }
-                  if (block.type === "tool_use") {
-                    // Skip internal SDK tools and track their IDs
-                    if (block.name === "ToolSearch") {
-                      suppressedToolIds.add(block.id);
-                      continue;
-                    }
-                    
-                    const toolInput = typeof block.input === "object" && block.input?.query
-                      ? block.input.query
-                      : undefined;
-                    controller.enqueue(`data: ${JSON.stringify({ 
-                      type: "tool_use", 
-                      tool: block.name,
-                      toolInput,
-                      conversationId 
-                    })}\n\n`);
-                  }
-                }
-              }
-            }
-
-            // Stream tool results back to UI
-            if (msg.type === "user" && msg.message?.content) {
-              const blocks = msg.message.content;
-              if (Array.isArray(blocks)) {
-                for (const block of blocks) {
-                  if (block.type === "tool_result") {
-                    // Skip results from internal SDK tools
-                    if (suppressedToolIds.has(block.tool_use_id)) {
-                      suppressedToolIds.delete(block.tool_use_id);
-                      continue;
-                    }
-                    
-                    let preview: string | undefined;
-                    if (typeof block.content === "string") {
-                      preview = block.content.slice(0, 200);
-                    } else if (Array.isArray(block.content)) {
-                      const textPart = block.content.find((p: any) => p.type === "text");
-                      if (textPart?.text) preview = textPart.text.slice(0, 200);
-                    }
-                    controller.enqueue(`data: ${JSON.stringify({
-                      type: "tool_result",
-                      content: preview,
-                      conversationId
-                    })}\n\n`);
-                  }
-                }
-              }
-            }
-
-            // Stream final result (only metadata, not content - that was already streamed in text blocks)
-            if (msg.type === "result") {
-              controller.enqueue(`data: ${JSON.stringify({ 
-                type: "result",
-                cost: msg.total_cost_usd,
-                turns: msg.num_turns,
-                conversationId 
-              })}\n\n`);
-              // If no text was streamed yet, use the result as content
-              if (!fullResponse && typeof msg.result === "string") {
-                fullResponse = msg.result;
-                controller.enqueue(`data: ${JSON.stringify({ 
-                  type: "text", 
-                  content: msg.result,
-                  conversationId 
-                })}\n\n`);
-              }
+          const text = assistantText.trim();
+          if (text) {
+            const last = session!.messages[session!.messages.length - 1];
+            if (last?.role === "user") {
+              session!.messages.push({ role: "assistant", content: text });
             }
           }
 
-          logger.info("agent:done", { conversationId });
-
-          if (fullResponse) {
-            session!.messages.push({ role: "assistant", content: fullResponse });
-          }
-
-          controller.enqueue(`data: ${JSON.stringify({ type: "done", conversationId })}\n\n`);
-          controller.close();
+          logger.info("agent:done", { conversationId, turns: appendMessages.length });
         } catch (error) {
           logger.error("Agent chat error", error);
-          controller.enqueue(`data: ${JSON.stringify({ 
-            type: "error", 
+          const last = session!.messages[session!.messages.length - 1];
+          if (last?.role === "user" && last.content === body.message) {
+            session!.messages.pop();
+          }
+          sse({
+            type: "error",
             content: error instanceof Error ? error.message : "Unknown error",
-            conversationId 
-          })}\n\n`);
+          });
           controller.close();
+          return;
         }
+
+        sse({ type: "done" });
+        controller.close();
       },
     });
 
@@ -234,37 +124,34 @@ Available table:
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
+        Connection: "keep-alive",
       },
     });
   });
 
-  // GET /api/agent/conversations/:id — Get conversation history
   app.get("/conversations/:id", (c) => {
     const id = c.req.param("id");
-    const session = sessions.get(id);
-    if (!session) {
+    const sess = sessions.get(id);
+    if (!sess) {
       return c.json({ error: "conversation not found" }, 404);
     }
-    return c.json({ 
-      conversationId: id, 
-      messages: session.messages 
+    return c.json({
+      conversationId: id,
+      messages: sess.messages,
     });
   });
 
-  // DELETE /api/agent/conversations/:id — Clear a conversation
   app.delete("/conversations/:id", (c) => {
     const id = c.req.param("id");
     sessions.delete(id);
     return c.json({ ok: true });
   });
 
-  // GET /api/agent/conversations — List all conversations
   app.get("/conversations", (c) => {
-    const conversations = Array.from(sessions.entries()).map(([id, session]) => ({
+    const conversations = Array.from(sessions.entries()).map(([id, sess]) => ({
       id,
-      messageCount: session.messages.length,
-      lastMessage: session.messages[session.messages.length - 1]?.content?.slice(0, 100) || "",
+      messageCount: sess.messages.length,
+      lastMessage: sess.messages[sess.messages.length - 1]?.content?.slice(0, 100) || "",
     }));
     return c.json(conversations);
   });

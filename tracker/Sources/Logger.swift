@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // MARK: - Formatting
@@ -20,6 +21,16 @@ func log(_ event: String, _ detail: String) {
 
     EventPoster.shared.enqueue(TrackerEvent(
         timestamp: isoTimestamp(), app: app, event_type: event, detail: detail
+    ))
+}
+
+/// One `SCROLL` row with merged `motion` + AX JSON from `getScrollLogPayload`.
+func logScrollSession(detail: String, display: String) {
+    let app = TrackerState.shared.currentApp
+    print("\(timestamp()) | \(app.padding(toLength: 20, withPad: " ", startingAt: 0)) | \("SCROLL".padding(toLength: 12, withPad: " ", startingAt: 0)) | \(display)")
+
+    EventPoster.shared.enqueue(TrackerEvent(
+        timestamp: isoTimestamp(), app: app, event_type: "SCROLL", detail: detail
     ))
 }
 

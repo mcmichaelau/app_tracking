@@ -3,9 +3,10 @@ import { join } from "path";
 import { eventsRoute } from "./routes/events";
 import { agentRoute } from "./routes/agent";
 import { logger } from "./logger";
-import { loadConfig, saveConfig } from "./config";
+import { loadConfig, resolveApiKey, saveConfig } from "./config";
 import { reconfigure } from "./interpretation";
-import { fetchTasks, insertTask, updateTask, deleteTask, deleteTasks } from "./db";
+import { fetchTasks, insertTask, updateTask, deleteTask, deleteTasks, fetchTaskTimeline, fetchEventCategories, fetchApiUsageSummary, recomputeTimestampLocalForAll } from "./db";
+import { runRetaskAgent } from "./retask";
 
 const UI_DIR = join(import.meta.dir, "..", "ui");
 const DIST_DIR = join(import.meta.dir, "..", "dist");
@@ -33,8 +34,8 @@ export async function startServer() {
 
   // POST /api/tasks
   api.post("/tasks", async (c) => {
-    const body = await c.req.json() as { title: string; description: string };
-    const id = insertTask({ title: body.title ?? "", description: body.description ?? "" });
+    const body = await c.req.json() as { title: string; description: string; category?: "Productivity" | "Leisure" | "Admin" | "Learning" | "Communication" };
+    const id = insertTask({ title: body.title ?? "", description: body.description ?? "", category: body.category ?? null });
     return c.json({ id });
   });
 
@@ -42,8 +43,16 @@ export async function startServer() {
   api.put("/tasks/:id", async (c) => {
     const id = parseInt(c.req.param("id"));
     if (isNaN(id)) return c.json({ error: "invalid id" }, 400);
-    const body = await c.req.json() as { title?: string; description?: string };
-    updateTask(id, body);
+    const body = await c.req.json() as {
+      title?: string;
+      description?: string;
+      category?: "Productivity" | "Leisure" | "Admin" | "Learning" | "Communication";
+    };
+    try {
+      updateTask(id, body);
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
     return c.json({ ok: true });
   });
 
@@ -55,6 +64,20 @@ export async function startServer() {
     return c.json({ ok: true });
   });
 
+  // GET /api/tasks/timeline
+  api.get("/tasks/timeline", (c) => {
+    const since = c.req.query("since");
+    const until = c.req.query("until");
+    return c.json(fetchTaskTimeline(since || undefined, until || undefined));
+  });
+
+  // GET /api/events/categorized
+  api.get("/events/categorized", (c) => {
+    const since = c.req.query("since");
+    const until = c.req.query("until");
+    return c.json(fetchEventCategories(since || undefined, until || undefined));
+  });
+
   // DELETE /api/tasks (body: { ids: number[] }) — delete visible tasks, clear task_id on raw_events
   api.delete("/tasks", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { ids?: number[] };
@@ -63,21 +86,69 @@ export async function startServer() {
     return c.json({ ok: true, deleted: ids.length });
   });
 
+  // GET /api/usage — API cost summary
+  api.get("/usage", (c) => {
+    return c.json(fetchApiUsageSummary());
+  });
+
+  // POST /api/retask — trigger the agent-based task segmentation immediately
+  api.post("/retask", async (c) => {
+    try {
+      await runRetaskAgent();
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 500);
+    }
+  });
+
   // GET /api/settings
   api.get("/settings", (c) => {
     const config = loadConfig();
-    const masked = config.openai_api_key
-      ? config.openai_api_key.slice(0, 7) + "••••••••"
-      : "";
-    return c.json({ openai_api_key: masked, has_key: !!config.openai_api_key });
+    const mask = (value?: string) => (value?.trim() ? value.slice(0, 7) + "••••••••" : "");
+    const openai = resolveApiKey("openai", config);
+    const anthropic = resolveApiKey("anthropic", config);
+    const gemini = resolveApiKey("gemini", config);
+    return c.json({
+      openai_api_key: mask(config.openai_api_key),
+      anthropic_api_key: mask(config.anthropic_api_key),
+      gemini_api_key: mask(config.gemini_api_key),
+      interpretation_api_key: mask(config.interpretation_api_key),
+      groq_api_key: mask(config.groq_api_key),
+      interpretation_base_url: config.interpretation_base_url ?? "",
+      interpretation_llm: config.interpretation_llm ?? "",
+      task_classifier_llm: config.task_classifier_llm ?? "",
+      timezone: config.timezone ?? "",
+      openai: { has_key: !!openai.value, source: openai.source },
+      anthropic: { has_key: !!anthropic.value, source: anthropic.source },
+      gemini: { has_key: !!gemini.value, source: gemini.source },
+    });
   });
 
   // PUT /api/settings
   api.put("/settings", async (c) => {
-    const body = await c.req.json() as { openai_api_key?: string };
+    const body = await c.req.json() as {
+      openai_api_key?: string;
+      anthropic_api_key?: string;
+      gemini_api_key?: string;
+      interpretation_api_key?: string;
+      groq_api_key?: string;
+      interpretation_base_url?: string;
+      interpretation_llm?: string;
+      task_classifier_llm?: string;
+      timezone?: string;
+    };
     const current = loadConfig();
     if (body.openai_api_key !== undefined) current.openai_api_key = body.openai_api_key;
+    if (body.anthropic_api_key !== undefined) current.anthropic_api_key = body.anthropic_api_key;
+    if (body.gemini_api_key !== undefined) current.gemini_api_key = body.gemini_api_key;
+    if (body.interpretation_api_key !== undefined) current.interpretation_api_key = body.interpretation_api_key;
+    if (body.groq_api_key !== undefined) current.groq_api_key = body.groq_api_key;
+    if (body.interpretation_base_url !== undefined) current.interpretation_base_url = body.interpretation_base_url;
+    if (body.interpretation_llm !== undefined) current.interpretation_llm = body.interpretation_llm;
+    if (body.task_classifier_llm !== undefined) current.task_classifier_llm = body.task_classifier_llm;
+    if (body.timezone !== undefined) current.timezone = body.timezone;
     saveConfig(current);
+    if (body.timezone !== undefined) recomputeTimestampLocalForAll();
     reconfigure();
     return c.json({ ok: true });
   });
@@ -190,7 +261,9 @@ export async function startServer() {
 
 // ── Tracker child process ─────────────────────────────────────────────────────
 
-const TRACKER_BINARY = join(import.meta.dir, "..", "..", "tracker", ".build", "release", "ActivityTracker");
+const TRACKER_BINARY =
+  process.env.TRACKER_BINARY ??
+  join(import.meta.dir, "..", "..", "tracker", ".build", "release", "ActivityTracker");
 
 export async function startTracker() {
   if (!(await Bun.file(TRACKER_BINARY).exists())) {

@@ -2,14 +2,17 @@ import { join } from "path";
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import {
   updateInterpretation,
-  assignEventToTask,
-  insertTask,
-  fetchMostRecentTaskWithLastEventTime,
   fetchRecentInterpretations,
-  fetchTasks,
-  updateTask,
+  insertApiUsage,
+  computeApiCost,
 } from "./db";
-import { loadConfig, INTERPRETATION_MODEL, configDir } from "./config";
+import { configDir } from "./config";
+import {
+  resolveInterpretationApiKey,
+  getInterpretationModel,
+  getInterpretationClient,
+} from "./llm";
+import { enqueueForClassification } from "./classification";
 import { logger } from "./logger";
 
 const LOGS_DIR = join(configDir, "interpretation_logs");
@@ -29,43 +32,59 @@ interface QueueItem {
 
 interface LLMResult {
   sentence: string;
-  task: {
-    type: "new_task";
-    task_title: string;
-    task_description: string;
-  } | {
-    type: "continue_task";
-    new_task_title: string | null;
-    task_description: string;
-  };
 }
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 20;
 const BATCH_FLUSH_MS = 4000;
-const TASK_STALE_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_DETAIL_CHARS = 1200;
+const MAX_CTX_CHARS = 400;
+const MAX_OUTPUT_TOKENS = 2000;
+const STUCK_THRESHOLD_MS = 90_000;
 
 let pendingBatch: QueueItem[] = [];
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
 let isProcessing = false;
 let apiKey: string | null = null;
 let systemPrompt: string | null = null;
+let warnedNoKey = false;
+let warnedNoPrompt = false;
+
+// Tracks every event enqueued for LLM interpretation until it resolves.
+const inflight = new Map<number, { event_type: string; app: string; enqueuedAt: number }>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, info] of inflight) {
+    const elapsedS = Math.round((now - info.enqueuedAt) / 1000);
+    if (elapsedS >= STUCK_THRESHOLD_MS / 1000) {
+      logger.warn(`[interp] STUCK    #${id} ${info.event_type} in ${info.app} (${elapsedS}s, no interpretation)`);
+    }
+  }
+}, 30_000).unref();
 
 export async function configure(): Promise<void> {
-  apiKey = process.env.OPENAI_API_KEY ?? loadConfig().openai_api_key ?? null;
+  apiKey = resolveInterpretationApiKey();
   if (!apiKey) {
     logger.info("interpretation: no API key — configure in settings");
+    warnedNoKey = false;
     return;
   }
+  logger.info(`interpretation: using key for model ${getInterpretationModel()}`);
   try {
     systemPrompt = await Bun.file(PROMPT_PATH).text();
     logger.info("interpretation: ready");
+    warnedNoPrompt = false;
   } catch {
+    systemPrompt = null;
     logger.warn(`interpretation: could not load prompt at ${PROMPT_PATH}`);
   }
 }
 
 export function reconfigure(): void {
-  apiKey = process.env.OPENAI_API_KEY ?? loadConfig().openai_api_key ?? null;
+  apiKey = resolveInterpretationApiKey();
+  warnedNoKey = false;
+  warnedNoPrompt = false;
+  logger.info(`interpretation: reconfigured hasKey=${!!apiKey} model=${getInterpretationModel()}`);
 }
 
 function saveBatchLog(
@@ -123,7 +142,22 @@ function maybeFlush(): void {
 }
 
 export function enqueue(item: QueueItem): void {
-  if (!apiKey || !systemPrompt) return;
+  if (!apiKey) {
+    if (!warnedNoKey) {
+      logger.warn("interpretation: skipping enqueue because no API key is configured");
+      warnedNoKey = true;
+    }
+    return;
+  }
+  if (!systemPrompt) {
+    if (!warnedNoPrompt) {
+      logger.warn("interpretation: skipping enqueue because prompt is not loaded");
+      warnedNoPrompt = true;
+    }
+    return;
+  }
+  inflight.set(item.id, { event_type: item.event_type, app: item.app, enqueuedAt: Date.now() });
+  logger.info(`[interp] queue    #${item.id} ${item.event_type} in ${item.app}`);
   pendingBatch.push(item);
   if (pendingBatch.length >= BATCH_SIZE) {
     maybeFlush();
@@ -133,278 +167,163 @@ export function enqueue(item: QueueItem): void {
 }
 
 async function processBatch(events: QueueItem[]): Promise<void> {
-  const recentTaskData = fetchMostRecentTaskWithLastEventTime();
-  let activeTask: { id: number; title: string; description: string } | null = null;
+  const ids = events.map(e => e.id);
+  const idStr = ids.length === 1 ? `#${ids[0]}` : `#${ids[0]}..#${ids[ids.length - 1]}`;
+  const recentHistory = fetchRecentInterpretations(10);
+  const results = await callOpenAI(events, recentHistory);
 
-  if (recentTaskData?.lastEventTime) {
-    const lastEventMs = new Date(recentTaskData.lastEventTime).getTime();
-    const firstEventMs = new Date(events[0].timestamp).getTime();
-    if (firstEventMs - lastEventMs <= TASK_STALE_MS) {
-      activeTask = recentTaskData.task;
+  if (!results || results.length < events.length) {
+    if (events.length > 1) {
+      const mid = Math.ceil(events.length / 2);
+      logger.warn(`[interp] retry    ${idStr} → splitting into ${mid}+${events.length - mid}`);
+      await processBatch(events.slice(0, mid));
+      await processBatch(events.slice(mid));
+    } else {
+      logger.warn(`[interp] FAIL     ${idStr} ${events[0].event_type} in ${events[0].app} → stuck on placeholder`);
+      inflight.delete(ids[0]);
     }
+    return;
   }
 
-  const recentHistory = fetchRecentInterpretations(10);
-  const recentTasks = fetchTasks(2);
-  const results = await callOpenAI(events, activeTask, recentHistory, recentTasks);
-  if (!results || results.length !== events.length) return;
-
-  // Process results in order, maintaining running task state so mid-batch
-  // task boundaries are handled correctly (e.g. new_task at event 3 of 5).
-  let currentTask: { id: number; title: string; description: string } | null = activeTask;
-
   for (let i = 0; i < events.length; i++) {
-    const event = events[i];
-    const result = results[i];
-
-    updateInterpretation(event.id, result.sentence);
-
-    if (result.task.type === "new_task") {
-      const taskId = insertTask({
-        title: result.task.task_title,
-        description: result.task.task_description,
-      });
-      assignEventToTask(event.id, taskId);
-      currentTask = { id: taskId, title: result.task.task_title, description: result.task.task_description };
-      logger.info("interpretation: created new task", { taskId, title: result.task.task_title });
-    } else {
-      if (currentTask) {
-        const updates: { title?: string; description?: string } = {};
-        if (result.task.new_task_title) updates.title = result.task.new_task_title;
-        if (result.task.task_description) updates.description = result.task.task_description;
-        if (Object.keys(updates).length > 0) {
-          updateTask(currentTask.id, updates);
-          currentTask = {
-            ...currentTask,
-            title: updates.title ?? currentTask.title,
-            description: updates.description ?? currentTask.description,
-          };
-        }
-        assignEventToTask(event.id, currentTask.id);
-        logger.info("interpretation: continued task", { taskId: currentTask.id });
-      } else {
-        // No prior task — create one from the continue_task data
-        const taskId = insertTask({
-          title: result.task.new_task_title ?? "Untitled Task",
-          description: result.task.task_description ?? "",
-        });
-        assignEventToTask(event.id, taskId);
-        currentTask = {
-          id: taskId,
-          title: result.task.new_task_title ?? "Untitled Task",
-          description: result.task.task_description ?? "",
-        };
-        logger.info("interpretation: created task (no previous)", { taskId });
-      }
-    }
+    updateInterpretation(events[i].id, results[i].sentence);
+    inflight.delete(events[i].id);
+    logger.info(`[interp] done     #${events[i].id} → "${results[i].sentence}"`);
+    enqueueForClassification({
+      id: events[i].id,
+      timestamp: events[i].timestamp,
+      interpretation: results[i].sentence,
+    });
   }
 }
 
 async function callOpenAI(
   events: QueueItem[],
-  activeTask: { id: number; title: string; description: string } | null,
   recentHistory: string[],
-  recentTasks: { id: number; title: string; description: string }[]
 ): Promise<LLMResult[] | null> {
   if (!apiKey || !systemPrompt) return null;
 
+  const trimForPrompt = (value: string | null | undefined, maxChars: number): string => {
+    const s = (value ?? "").replace(/\s+/g, " ").trim();
+    if (s.length <= maxChars) return s;
+    return `${s.slice(0, maxChars)}…`;
+  };
+
   const eventLines = events.map((e, i) => {
-    let lines = `Event ${i + 1}:\nType: ${e.event_type}\nApp: ${e.app}\nDetail: ${e.detail ?? ""}`;
+    let line = `${i + 1}. ${e.event_type} | ${e.app} | ${trimForPrompt(e.detail, MAX_DETAIL_CHARS)}`;
     if (e.clickContext) {
-      lines += `\nClick context (most recent click in ${e.clickContext.app}): ${e.clickContext.detail}`;
+      line += ` [ctx: ${e.clickContext.app} | ${trimForPrompt(e.clickContext.detail, MAX_CTX_CHARS)}]`;
     }
-    return lines;
-  }).join("\n\n");
+    return line;
+  }).join("\n");
 
-  let userMessage = `Events to interpret (${events.length} event${events.length > 1 ? "s" : ""}, in order):\n\n${eventLines}`;
-
+  let userMessage = eventLines;
   if (recentHistory.length > 0) {
-    userMessage += `\n\nRecent activity (last ${recentHistory.length} events before this batch, oldest first):\n${recentHistory.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
-  }
-  // Show last 2 tasks for context, marking the active one as current
-  if (recentTasks.length > 0) {
-    const taskLines = recentTasks.map((t, i) => {
-      const label = i === 0 ? "Current task" : "Previous task";
-      const stale = activeTask === null && i === 0 ? " (stale — no active task)" : "";
-      return `${label}${stale}:\nTitle: ${t.title}\nDescription: ${t.description}`;
-    }).join("\n\n");
-    userMessage += `\n\n${taskLines}`;
-    if (activeTask === null) {
-      userMessage += `\n\nNo active task (last task is stale). You must create a new task for the first event.`;
-    }
-  } else {
-    userMessage += `\n\nNo current task exists. You must create a new task for the first event.`;
+    userMessage += `\nRecent: ${recentHistory.join(" | ")}`;
   }
 
-  const logInput = { model: INTERPRETATION_MODEL, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }] };
-  const body = {
-    model: INTERPRETATION_MODEL,
-    instructions: systemPrompt,
-    input: userMessage,
-    tools: [{
-      type: "function" as const,
+  const model = getInterpretationModel();
+  const ids = events.map(e => e.id);
+  const idStr = ids.length === 1 ? `#${ids[0]}` : `#${ids[0]}..#${ids[ids.length - 1]}`;
+
+  const messages = [
+    { role: "system" as const, content: systemPrompt },
+    { role: "user" as const, content: userMessage },
+  ];
+  const tools = [{
+    type: "function" as const,
+    function: {
       name: "save_interpretations",
-      description: "Saves interpretations and task assignments for a batch of user activity events.",
+      description: "One sentence per event, same order as input.",
       parameters: {
         type: "object",
         properties: {
           events: {
             type: "array",
-            description: "One interpretation per event, in the same order as the input.",
             items: {
               type: "object",
               properties: {
-                sentence: {
-                  type: "string",
-                  description: "A specific, detailed sentence describing what the user did.",
-                },
-                task: {
-                  type: "object",
-                  description: "Task assignment for this event.",
-                  properties: {
-                    type: {
-                      type: "string",
-                      enum: ["new_task", "continue_task"],
-                      description: "Whether to create a new task or continue the current one.",
-                    },
-                    task_title: {
-                      type: "string",
-                      description: "For new_task: title of the new task.",
-                    },
-                    task_description: {
-                      type: "string",
-                      description: "For new_task: goal description. For continue_task: complete replacement description reflecting the full goal.",
-                    },
-                    new_task_title: {
-                      type: "string",
-                      description: "For continue_task: refined title when intent has become clearer mid-batch (e.g. 'Opening new tab' → 'Shopping for Dickies 874 pants'). Null to keep current title.",
-                    },
-                  },
-                  required: ["type"],
-                },
+                sentence: { type: "string", description: "What the user did (max 12 words)." },
               },
-              required: ["sentence", "task"],
+              required: ["sentence"],
             },
           },
         },
         required: ["events"],
       },
-    }],
-    tool_choice: { type: "function" as const, name: "save_interpretations" },
-    reasoning: { effort: "low" as const },
-    text: { verbosity: "medium" as const },
-    max_output_tokens: 2000,
-  };
+    },
+  }];
+
+  const logInput = { model, messages };
+
+  const client = getInterpretationClient();
+  if (!client) {
+    logger.warn(`[interp] no-client ${idStr} → no LLM client configured`);
+    return null;
+  }
+
+  logger.info(`[interp] send     ${idStr} (${events.length}) → ${model}`);
 
   try {
-    const res = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120000),
-    });
+    const completion = await client.chat.completions.create({
+      model,
+      messages,
+      tools,
+      tool_choice: { type: "function" as const, function: { name: "save_interpretations" } },
+      temperature: 0.3,
+      max_tokens: MAX_OUTPUT_TOKENS,
+    }, { signal: AbortSignal.timeout(120000) });
 
-    const rawResponse = await res.json().catch(() => null);
-
-    if (!res.ok) {
-      const errBody = typeof rawResponse === "object" ? JSON.stringify(rawResponse) : String(rawResponse);
-      logger.warn(`interpretation: HTTP ${res.status} for batch [${events.map(e => e.id).join(",")}]: ${errBody}`);
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: rawResponse,
-        error: `HTTP ${res.status}: ${errBody}`,
-      });
-      return null;
-    }
-
-    const json = rawResponse as { output?: Array<{ type?: string; name?: string; arguments?: string }> };
-    const toolCall = json?.output?.find((o) => o.type === "function_call");
-    const argsStr = toolCall?.arguments;
+    const toolCall = completion.choices[0]?.message?.tool_calls?.[0];
+    const argsStr = toolCall?.function?.arguments;
     if (!argsStr) {
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: json,
-        error: "No tool call in response",
-      });
+      logger.warn(`[interp] no-args  ${idStr} → LLM returned no tool call`);
+      saveBatchLog(events, logInput, { success: false, raw: completion, error: "No tool call in response" });
       return null;
     }
 
-    const args = JSON.parse(argsStr) as Record<string, unknown>;
-    const rawEvents = args.events as Array<Record<string, unknown>>;
-    logger.info("interpretation: llm_response", {
-      eventIds: events.map(e => e.id),
-      model: INTERPRETATION_MODEL,
-      resultCount: rawEvents?.length,
-    });
+    let args: Record<string, unknown>;
+    try {
+      args = JSON.parse(argsStr) as Record<string, unknown>;
+    } catch {
+      logger.warn(`[interp] bad-json ${idStr} → malformed tool call arguments`);
+      saveBatchLog(events, logInput, { success: false, raw: completion, error: "Malformed tool call JSON" });
+      return null;
+    }
 
-    if (!Array.isArray(rawEvents) || rawEvents.length !== events.length) {
-      saveBatchLog(events, logInput, {
-        success: false,
-        raw: args,
-        error: `Expected ${events.length} results, got ${rawEvents?.length}`,
-      });
+    const rawEvents = args.events as Array<Record<string, unknown>>;
+    const got = rawEvents?.length ?? 0;
+
+    if (!Array.isArray(rawEvents) || got < events.length) {
+      logger.warn(`[interp] short    ${idStr} → expected ${events.length}, got ${got}`);
+      saveBatchLog(events, logInput, { success: false, raw: args, error: `Expected ${events.length} results, got ${got}` });
       return null;
     }
 
     const results: LLMResult[] = [];
-    for (const item of rawEvents) {
-      if (!item?.sentence || !(item.task as Record<string, unknown>)?.type) {
-        saveBatchLog(events, logInput, {
-          success: false,
-          raw: args,
-          error: "Missing sentence or task type in item",
-        });
+    for (let i = 0; i < events.length; i++) {
+      const item = rawEvents[i];
+      if (!item?.sentence) {
+        logger.warn(`[interp] bad-item ${idStr} → missing sentence at index ${i}`);
+        saveBatchLog(events, logInput, { success: false, raw: args, error: "Missing sentence in item" });
         return null;
       }
-
-      const sentence = String(item.sentence).trim();
-      const t = item.task as Record<string, unknown>;
-      const taskType = t.type;
-
-      if (taskType === "new_task") {
-        results.push({
-          sentence,
-          task: {
-            type: "new_task",
-            task_title: (t.task_title as string) ?? "Untitled",
-            task_description: (t.task_description as string) ?? "",
-          },
-        });
-      } else if (taskType === "continue_task") {
-        results.push({
-          sentence,
-          task: {
-            type: "continue_task",
-            new_task_title: (t.new_task_title as string | null) ?? null,
-            task_description: (t.task_description as string) ?? "",
-          },
-        });
-      } else {
-        saveBatchLog(events, logInput, {
-          success: false,
-          raw: args,
-          error: `Unknown task type: ${taskType}`,
-        });
-        return null;
-      }
+      results.push({ sentence: String(item.sentence).trim() });
     }
 
-    saveBatchLog(events, logInput, {
-      success: true,
-      results,
-      raw: args,
-    });
+    saveBatchLog(events, logInput, { success: true, results, raw: args });
+
+    const inputTokens  = completion.usage?.prompt_tokens     ?? 0;
+    const outputTokens = completion.usage?.completion_tokens ?? 0;
+    if (inputTokens > 0 || outputTokens > 0) {
+      insertApiUsage({ model, operation: "interpretation", inputTokens, outputTokens, costUsd: computeApiCost(model, inputTokens, outputTokens) });
+    }
+
     return results;
   } catch (e: unknown) {
     const errMsg = (e as Error).message;
-    logger.warn(`interpretation: request failed for batch [${events.map(ev => ev.id).join(",")}]: ${errMsg}`);
-    saveBatchLog(events, logInput, {
-      success: false,
-      error: errMsg,
-    });
+    logger.warn(`[interp] error    ${idStr} → ${errMsg}`);
+    saveBatchLog(events, logInput, { success: false, error: errMsg });
     return null;
   }
 }

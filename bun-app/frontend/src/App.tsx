@@ -4,7 +4,7 @@ import Events from "./pages/Events";
 import Tasks from "./pages/Tasks";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
-import Chat from "./pages/Chat";
+import Insights from "./pages/Insights";
 
 export default function App() {
   return (
@@ -15,9 +15,9 @@ export default function App() {
           <Route path="/" element={<Events />} />
           <Route path="/events" element={<Events />} />
           <Route path="/tasks" element={<Tasks />} />
+          <Route path="/insights" element={<Insights />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/chat" element={<Chat />} />
         </Routes>
       </div>
     </div>

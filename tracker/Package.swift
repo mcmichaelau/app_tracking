@@ -7,7 +7,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ActivityTracker",
-            path: "Sources"
+            path: "Sources",
+            exclude: ["DesktopApp"]
+        ),
+        .executableTarget(
+            name: "ActivityDesktop",
+            path: "Sources/DesktopApp"
         )
     ]
 )

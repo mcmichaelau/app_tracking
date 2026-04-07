@@ -27,6 +27,7 @@ export interface Task {
   id: number;
   title: string;
   description: string;
+  category: "Productivity" | "Leisure" | "Admin" | "Learning" | "Communication" | null;
 }
 
 export async function fetchTasks(limit?: number): Promise<Task[]> {
@@ -67,12 +68,104 @@ export async function deleteAllTasks(ids: number[]): Promise<{ ok: boolean; dele
   return res.json();
 }
 
-export async function fetchSettings() {
+export interface TaskTimelineEntry {
+  id: number;
+  title: string;
+  description: string;
+  category: "Productivity" | "Leisure" | "Admin" | "Learning" | "Communication" | null;
+  event_count: number;
+  first_event: string | null;
+  last_event: string | null;
+}
+
+export async function fetchTaskTimeline(params: { since?: string; until?: string }): Promise<TaskTimelineEntry[]> {
+  const q = new URLSearchParams();
+  if (params.since) q.set("since", params.since);
+  if (params.until) q.set("until", params.until);
+  const res = await fetch(`${API}/tasks/timeline?${q}`);
+  return res.json();
+}
+
+export interface CategorizedEvent {
+  event_id: number;
+  timestamp: string;
+  /** Wall-clock in configured timezone (YYYY-MM-DDTHH:MM:SS.mmm). */
+  timestamp_local?: string;
+  app: string;
+  event_type: string;
+  detail: string | null;
+  interpretation: string | null;
+  task_id: number;
+  task_title: string;
+  task_description: string;
+  category: "Productivity" | "Leisure" | "Admin" | "Learning" | "Communication" | null;
+}
+
+export async function fetchEventCategories(params: { since?: string; until?: string }): Promise<CategorizedEvent[]> {
+  const q = new URLSearchParams();
+  if (params.since) q.set("since", params.since);
+  if (params.until) q.set("until", params.until);
+  const res = await fetch(`${API}/events/categorized?${q}`);
+  return res.json();
+}
+
+export interface SettingsResponse {
+  openai_api_key: string;
+  anthropic_api_key: string;
+  gemini_api_key: string;
+  interpretation_api_key: string;
+  groq_api_key: string;
+  interpretation_base_url: string;
+  interpretation_llm: string;
+  task_classifier_llm: string;
+  /** IANA timezone; empty = server default (usually system zone). */
+  timezone: string;
+  openai: { has_key: boolean; source: "env" | "config" | "none" };
+  anthropic: { has_key: boolean; source: "env" | "config" | "none" };
+  gemini: { has_key: boolean; source: "env" | "config" | "none" };
+}
+
+export interface ApiUsagePeriod {
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+export interface ApiUsageSummary {
+  today: ApiUsagePeriod;
+  week: ApiUsagePeriod;
+  month: ApiUsagePeriod;
+  allTime: ApiUsagePeriod;
+  byModel: Array<{
+    model: string;
+    operation: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+  }>;
+}
+
+export async function fetchUsage(): Promise<ApiUsageSummary> {
+  const res = await fetch(`${API}/usage`);
+  return res.json();
+}
+
+export async function fetchSettings(): Promise<SettingsResponse> {
   const res = await fetch(`${API}/settings`);
   return res.json();
 }
 
-export async function saveSettings(settings: { openai_api_key?: string }) {
+export async function saveSettings(settings: {
+  openai_api_key?: string;
+  anthropic_api_key?: string;
+  gemini_api_key?: string;
+  interpretation_api_key?: string;
+  groq_api_key?: string;
+  interpretation_base_url?: string;
+  interpretation_llm?: string;
+  task_classifier_llm?: string;
+  timezone?: string;
+}) {
   const res = await fetch(`${API}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

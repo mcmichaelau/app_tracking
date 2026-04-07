@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.env.release
 
 # Dependencies
 node_modules/
@@ -67,7 +68,23 @@ package-lock.json
 .claude/
 
 # Testing artifacts (may contain personal data)
-testing/interpretted_output.csv
+testing/*.csv
+testing/task_results_*.md
+
+# Scripts: generated output files (may contain real activity data, can be large)
+scripts/simulate-day*.json
+scripts/simulate-day*.html
 
 # Tracker binary
 tracker/tracker
+
+# Release scripts and docs (contain personal signing identity / credentials)
+README_RELEASE.md
+scripts/release-macos.sh
+scripts/build-macos-app.sh
+
+# Signing / notarization secrets
+*.p12
+*.p8
+notarytool-profile.txt
+release-secrets.env

@@ -5,6 +5,7 @@ import { DataTable, cellStyles, type Column } from "../components/DataTable";
 const columns: Column<Task>[] = [
   { key: "id", header: "id", render: (t) => t.id, style: cellStyles.text3, width: 45 },
   { key: "title", header: "title", render: (t) => t.title, style: cellStyles.text, width: 200 },
+  { key: "category", header: "category", render: (t) => t.category ?? "—", style: cellStyles.text3, width: 120 },
   { key: "description", header: "description", render: (t) => t.description, style: cellStyles.text2, flex: true },
 ];
 

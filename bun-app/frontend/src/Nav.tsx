@@ -7,9 +7,9 @@ export default function Nav() {
       <span style={sepStyle}>/</span>
       <NavLink to="/tasks" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>tasks</NavLink>
       <span style={sepStyle}>/</span>
-      <NavLink to="/logs" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>logs</NavLink>
+      <NavLink to="/insights" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>insights</NavLink>
       <span style={sepStyle}>/</span>
-      <NavLink to="/chat" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>chat</NavLink>
+      <NavLink to="/logs" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>logs</NavLink>
       <span style={sepStyle}>/</span>
       <NavLink to="/settings" style={({ isActive }) => ({ ...linkStyle, color: isActive ? "var(--text)" : "var(--text2)" })}>settings</NavLink>
     </nav>

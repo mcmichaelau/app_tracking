@@ -14,14 +14,34 @@ const MAX_RECENT = 500;
 const subscribers = new Set<(line: string) => void>();
 
 function write(level: string, msg: string, data?: unknown) {
-  const line = `${new Date().toISOString()} [${level}] ${msg}${data !== undefined ? " " + JSON.stringify(data) : ""}`;
-  process.stdout.write(line + "\n");
-  appendFileSync(logPath, line + "\n");
+  const ts = new Date().toISOString();
+  const head = `${ts} [${level}] ${msg}`;
+  const lines: string[] = [];
 
-  recentLines.push(line);
-  if (recentLines.length > MAX_RECENT) recentLines.shift();
+  if (data === undefined) {
+    lines.push(head);
+  } else {
+    const text =
+      typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    if (text.includes("\n")) {
+      lines.push(head);
+      for (const row of text.split("\n")) {
+        lines.push(`  ${row}`);
+      }
+    } else {
+      lines.push(`${head} ${text}`);
+    }
+  }
 
-  for (const fn of subscribers) fn(line);
+  for (const line of lines) {
+    process.stdout.write(line + "\n");
+    appendFileSync(logPath, line + "\n");
+
+    recentLines.push(line);
+    if (recentLines.length > MAX_RECENT) recentLines.shift();
+
+    for (const fn of subscribers) fn(line);
+  }
 }
 
 export const logger = {
